@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+faster-whisper
+pyannote.audio==4.0.4
+torch
+librosa
+soundfile
+anthropic
+python-dotenv
+python-multipart
+numpy

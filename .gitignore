@@ -1,0 +1,40 @@
+# Secrets / local config
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Model / HuggingFace / torch caches
+.cache/
+*.pt
+*.bin
+*.onnx
+
+# Temp audio / working files
+*.wav
+*.tmp
+asr_*/
+warmup_*.wav
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Logs
+*.log
