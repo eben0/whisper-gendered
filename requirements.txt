@@ -9,3 +9,5 @@ anthropic
 python-dotenv
 python-multipart
 numpy
+pytest
+pytest-asyncio
