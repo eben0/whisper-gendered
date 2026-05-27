@@ -23,7 +23,7 @@ def test_splits_when_current_span_reaches_target():
     # target 10s: seg c starts a new chunk because [0,10) already spans >= 10.
     a, b, c, d = _seg(0, 4), _seg(4, 10), _seg(10, 14), _seg(14, 20)
     chunks = make_chunks([a, b, c, d], target_sec=10)
-    assert [ [s for s in ch.segments] for ch in chunks ] == [[a, b], [c, d]]
+    assert [ch.segments for ch in chunks] == [[a, b], [c, d]]
     assert (chunks[0].start, chunks[0].end) == (0, 10)
     assert (chunks[1].start, chunks[1].end) == (10, 20)
 
@@ -42,3 +42,24 @@ def test_tiny_trailing_chunk_merges_into_previous():
     assert len(chunks) == 1
     assert chunks[0].segments == [a, b, c]
     assert chunks[0].end == 13
+
+
+def test_trailing_chunk_above_merge_threshold_is_not_merged():
+    # target 10, merge_ratio 0.5: trailing chunk spans 8s (>= 5s) -> stays separate.
+    a, b, c = _seg(0, 6), _seg(6, 12), _seg(12, 20)
+    chunks = make_chunks([a, b, c], target_sec=10, merge_ratio=0.5)
+    assert len(chunks) == 2
+    assert chunks[0].segments == [a, b]
+    assert chunks[1].segments == [c]
+
+
+def test_invalid_target_sec_raises():
+    import pytest
+    with pytest.raises(ValueError):
+        make_chunks([_seg(0, 1)], target_sec=0)
+
+
+def test_invalid_merge_ratio_raises():
+    import pytest
+    with pytest.raises(ValueError):
+        make_chunks([_seg(0, 1)], target_sec=10, merge_ratio=1.0)

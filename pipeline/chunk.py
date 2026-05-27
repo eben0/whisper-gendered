@@ -28,10 +28,16 @@ def make_chunks(
     """Split ``segments`` into chunks each spanning roughly ``target_sec``.
 
     A new chunk starts once the current chunk's span (last.end - first.start)
-    reaches ``target_sec``. A trailing chunk shorter than ``merge_ratio *
-    target_sec`` is merged into the previous chunk so the final chunk is never
-    too short to diarize well.
+    reaches ``target_sec``. Span is measured as the last accumulated segment's
+    end minus the first segment's start, so any silence gap before the incoming
+    segment is not counted until that segment is added. A trailing chunk shorter
+    than ``merge_ratio * target_sec`` is merged into the previous chunk so the
+    final chunk is never too short to diarize well.
     """
+    if target_sec <= 0:
+        raise ValueError(f"target_sec must be positive, got {target_sec}")
+    if not 0 <= merge_ratio < 1:
+        raise ValueError(f"merge_ratio must be in [0, 1), got {merge_ratio}")
     if not segments:
         return []
 
