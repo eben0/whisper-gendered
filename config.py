@@ -60,6 +60,10 @@ class Settings:
     ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
     CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
     GENDER_THRESHOLD_HZ: float = _env_float("GENDER_THRESHOLD_HZ", 165.0)
+    # Chunked-pipeline tuning.
+    CHUNK_DURATION_SEC: int = _env_int("CHUNK_DURATION_SEC", 300)
+    TRANSLATE_CONCURRENCY: int = _env_int("TRANSLATE_CONCURRENCY", 3)
+    CLAUDE_MAX_RETRIES: int = _env_int("CLAUDE_MAX_RETRIES", 4)
     DEBUG: bool = _env_bool("DEBUG", False)
 
     def translation_enabled(self) -> bool:
