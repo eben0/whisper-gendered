@@ -10,7 +10,6 @@ Speakers with no detectable voiced frames default to "male".
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 import librosa
 import numpy as np
@@ -27,9 +26,14 @@ FMIN_HZ = 65.0
 FMAX_HZ = 300.0
 
 
-def detect_genders(audio_path: Path, diarization: Annotation) -> dict[str, str]:
-    """Return {speaker_label: "male" | "female"} for every diarized speaker."""
-    audio, _sr = librosa.load(str(audio_path), sr=SR, mono=True)
+def detect_genders(
+    audio: np.ndarray, sr: int, diarization: Annotation
+) -> dict[str, str]:
+    """Return {speaker_label: "male" | "female"} for every diarized speaker.
+
+    ``audio`` is a mono float32 waveform; ``diarization`` turn times must be in
+    the same time base as ``audio`` (i.e. both relative to the same slice start).
+    """
     total = len(audio)
 
     genders: dict[str, str] = {}
@@ -42,8 +46,8 @@ def detect_genders(audio_path: Path, diarization: Annotation) -> dict[str, str]:
                 continue
             if (turn.end - turn.start) < MIN_SEGMENT_SEC:
                 continue
-            i0 = max(0, int(turn.start * SR))
-            i1 = min(total, int(turn.end * SR))
+            i0 = max(0, int(turn.start * sr))
+            i1 = min(total, int(turn.end * sr))
             if i1 > i0:
                 chunks.append(audio[i0:i1])
 
@@ -54,7 +58,7 @@ def detect_genders(audio_path: Path, diarization: Annotation) -> dict[str, str]:
 
         signal = np.concatenate(chunks)
         f0, voiced_flag, _voiced_prob = librosa.pyin(
-            signal, sr=SR, fmin=FMIN_HZ, fmax=FMAX_HZ,
+            signal, sr=sr, fmin=FMIN_HZ, fmax=FMAX_HZ,
         )
         voiced_f0 = f0[np.isfinite(f0)]
 
