@@ -54,3 +54,10 @@ async def test_translate_batch_async_empty_input():
     client = _FakeAsyncClient([])
     out = await translate.translate_batch_async([], "female", "Hebrew", client)
     assert out == []
+
+
+@pytest.mark.asyncio
+async def test_translate_batch_async_returns_source_on_unparseable_response():
+    client = _FakeAsyncClient(["this is not json at all"])
+    out = await translate.translate_batch_async(["a", "b"], "male", "Hebrew", client)
+    assert out == ["a", "b"]  # JSON parse fails -> falls back to source text

@@ -139,7 +139,7 @@ async def _translate_one_batch_async(
     texts: list[str],
     gender: str | None,
     target_language: str,
-    client: "anthropic.AsyncAnthropic",
+    client: anthropic.AsyncAnthropic,
 ) -> list[str]:
     numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
     response = await client.messages.create(
@@ -169,7 +169,7 @@ async def translate_batch_async(
     texts: list[str],
     gender: str | None,
     target_language: str,
-    client: "anthropic.AsyncAnthropic",
+    client: anthropic.AsyncAnthropic,
 ) -> list[str]:
     """Async counterpart of ``translate_batch`` for the chunked orchestrator.
 
