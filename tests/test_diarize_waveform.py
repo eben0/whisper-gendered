@@ -44,3 +44,23 @@ def test_diarize_waveform_unwraps_speaker_diarization_attr(monkeypatch):
     monkeypatch.setattr(diarize, "get_pipeline", lambda: _WrappingPipe())
     ann = diarize.diarize_waveform(np.zeros(8000, dtype=np.float32), 16000)
     assert ann.labels() == ["SPEAKER_01"]
+
+
+def test_diarize_waveform_2d_channel_time_passes_through(monkeypatch):
+    fake = _FakePipe()
+    monkeypatch.setattr(diarize, "get_pipeline", lambda: fake)
+
+    stereo = np.zeros((2, 16000), dtype=np.float32)  # (channel, time)
+    diarize.diarize_waveform(stereo, 16000)
+
+    assert tuple(fake.called_with["waveform"].shape) == (2, 16000)  # unchanged
+
+
+def test_diarize_waveform_coerces_float64_to_float32(monkeypatch):
+    fake = _FakePipe()
+    monkeypatch.setattr(diarize, "get_pipeline", lambda: fake)
+
+    mono64 = np.zeros(16000, dtype=np.float64)
+    diarize.diarize_waveform(mono64, 16000)
+
+    assert fake.called_with["waveform"].dtype == __import__("torch").float32

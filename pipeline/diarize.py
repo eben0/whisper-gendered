@@ -49,10 +49,13 @@ def diarize_waveform(waveform: np.ndarray, sr: int) -> Annotation:
     """Diarize an in-memory waveform.
 
     ``waveform`` is float32, shape ``(time,)`` for mono or ``(channel, time)``.
-    Bypasses torchcodec/FFmpeg by handing pyannote a {waveform, sample_rate}
-    dict directly.
+    We hand pyannote a {waveform, sample_rate} dict directly rather than a file
+    path: that bypasses torchcodec/FFmpeg-DLL audio decoding, which is awkward
+    to install on Windows. The dtype is coerced to float32 so callers passing
+    slices that may have upcast (e.g. via numpy ops) still get correct results.
     """
     pipe = get_pipeline()
+    waveform = waveform.astype(np.float32, copy=False)
     wav2d = waveform[np.newaxis, :] if waveform.ndim == 1 else waveform
     tensor = torch.from_numpy(np.ascontiguousarray(wav2d))
     with torch.inference_mode():
