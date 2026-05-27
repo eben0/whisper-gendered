@@ -133,3 +133,54 @@ def translate_batch(
     for batch in _chunks(texts):
         out.extend(_translate_one_batch(batch, gender, target_language, client))
     return out
+
+
+async def _translate_one_batch_async(
+    texts: list[str],
+    gender: str | None,
+    target_language: str,
+    client: "anthropic.AsyncAnthropic",
+) -> list[str]:
+    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
+    response = await client.messages.create(
+        model=settings.CLAUDE_MODEL,
+        max_tokens=MAX_TOKENS,
+        system=_system_prompt(target_language, gender),
+        output_config={"format": _OUTPUT_FORMAT},
+        messages=[{"role": "user", "content": numbered}],
+    )
+    raw = next((b.text for b in response.content if b.type == "text"), "")
+    try:
+        translations = json.loads(raw).get("translations", [])
+    except (json.JSONDecodeError, AttributeError):
+        log.warning("Could not parse translation JSON; returning source text.")
+        return texts
+
+    if len(translations) != len(texts):
+        log.warning(
+            "Translation count mismatch (got %d, expected %d); aligning by index.",
+            len(translations), len(texts),
+        )
+        translations = (translations + texts[len(translations):])[: len(texts)]
+    return [str(t) for t in translations]
+
+
+async def translate_batch_async(
+    texts: list[str],
+    gender: str | None,
+    target_language: str,
+    client: "anthropic.AsyncAnthropic",
+) -> list[str]:
+    """Async counterpart of ``translate_batch`` for the chunked orchestrator.
+
+    Sub-batches run sequentially within one call; cross-chunk concurrency is
+    handled by the caller's semaphore. Output length always equals input length.
+    """
+    if not texts:
+        return []
+    out: list[str] = []
+    for batch in _chunks(texts):
+        out.extend(
+            await _translate_one_batch_async(batch, gender, target_language, client)
+        )
+    return out
