@@ -45,22 +45,28 @@ def get_pipeline() -> Pipeline:
     return _pipeline
 
 
-def diarize(audio_path: Path) -> Annotation:
-    """Run speaker diarization and return a pyannote Annotation."""
+def diarize_waveform(waveform: np.ndarray, sr: int) -> Annotation:
+    """Diarize an in-memory waveform.
+
+    ``waveform`` is float32, shape ``(time,)`` for mono or ``(channel, time)``.
+    Bypasses torchcodec/FFmpeg by handing pyannote a {waveform, sample_rate}
+    dict directly.
+    """
     pipe = get_pipeline()
-    # Load the audio in-memory and hand pyannote a {waveform, sample_rate} dict.
-    # This bypasses torchcodec/FFmpeg-DLL decoding, which is awkward to install
-    # on Windows. Input is already 16 kHz mono WAV from the encode step.
-    data, sr = sf.read(str(audio_path), dtype="float32", always_2d=True)
-    waveform = torch.from_numpy(np.ascontiguousarray(data.T))  # (channel, time)
+    wav2d = waveform[np.newaxis, :] if waveform.ndim == 1 else waveform
+    tensor = torch.from_numpy(np.ascontiguousarray(wav2d))
     with torch.inference_mode():
-        result = pipe({"waveform": waveform, "sample_rate": sr})
-    # pyannote 4.x may return a wrapped output object; older pipelines return a
-    # bare Annotation. Accept either.
+        result = pipe({"waveform": tensor, "sample_rate": sr})
     annotation = getattr(result, "speaker_diarization", result)
     speakers = annotation.labels()
     log.info("Diarized %d speaker(s): %s", len(speakers), speakers)
     return annotation
+
+
+def diarize(audio_path: Path) -> Annotation:
+    """Run speaker diarization on a WAV file (used for warm-up / whole-file)."""
+    data, sr = sf.read(str(audio_path), dtype="float32", always_2d=True)
+    return diarize_waveform(data.T, sr)  # data.T -> (channel, time)
 
 
 def assign_speaker(segment: Segment, diarization: Annotation) -> str | None:
