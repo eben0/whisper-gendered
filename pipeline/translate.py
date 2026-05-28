@@ -44,7 +44,11 @@ _OUTPUT_FORMAT = {
 }
 
 
-def _system_prompt(target_language: str, gender: str | None) -> str:
+def _system_prompt(
+    target_language: str,
+    gender: str | None,
+    addressee_gender: str | None = None,
+) -> str:
     base = (
         f"You are an expert subtitle translator. Translate each numbered line "
         f"from English into {target_language}. Produce natural, idiomatic, "
@@ -57,6 +61,19 @@ def _system_prompt(target_language: str, gender: str | None) -> str:
             f"{gender} forms throughout — verb conjugation, adjective and "
             f"participle agreement, imperatives, and pronouns must all match a "
             f"{gender} speaker referring to themselves."
+        )
+        if addressee_gender is not None:
+            base += (
+                f" When the speaker addresses another person (English \"you\"), "
+                f"the most likely addressee in this exchange is "
+                f"{addressee_gender}; prefer that form for singular \"you\" "
+                f"unless context clearly implies a different addressee."
+            )
+        base += (
+            " Infer number from context — collective cues like \"you all\", "
+            "\"you guys\", or plural verbs imply plural. When number is "
+            "ambiguous in a multi-person scene, prefer the inclusive plural "
+            "form (e.g., אתם in Hebrew). Do not mix forms within a single line."
         )
     base += (
         " Return a JSON object with a 'translations' array containing exactly "

@@ -61,3 +61,21 @@ async def test_translate_batch_async_returns_source_on_unparseable_response():
     client = _FakeAsyncClient(["this is not json at all"])
     out = await translate.translate_batch_async(["a", "b"], "male", "Hebrew", client)
     assert out == ["a", "b"]  # JSON parse fails -> falls back to source text
+
+
+def test_system_prompt_includes_addressee_sentence_when_set():
+    prompt = translate._system_prompt("Hebrew", "female", addressee_gender="male")
+    assert "male" in prompt
+    assert "addressee" in prompt.lower()
+
+
+def test_system_prompt_omits_addressee_sentence_when_unset():
+    prompt = translate._system_prompt("Hebrew", "female")
+    assert "addressee" not in prompt.lower()
+
+
+def test_system_prompt_addresses_number_when_target_is_gender_aware():
+    # Number guidance should appear for any gender-marked target language.
+    prompt = translate._system_prompt("Hebrew", "male", addressee_gender=None)
+    # The "you" / number guidance should be present regardless of addressee_gender.
+    assert "plural" in prompt.lower()
