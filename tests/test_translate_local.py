@@ -187,12 +187,33 @@ async def test_smoke_opus_mt_en_he_produces_hebrew(monkeypatch):
 # 3. Regression — TRANSLATION_BACKEND=claude (default) keeps the Claude path
 # ---------------------------------------------------------------------------- #
 
-def test_default_backend_resolves_to_claude_module():
-    # Importing server should bind ``server.translate`` to pipeline.translate
-    # because TRANSLATION_BACKEND defaults to "claude". This guards against a
-    # future refactor accidentally flipping the default.
+def test_default_backend_resolves_to_claude_module(monkeypatch):
+    # When TRANSLATION_BACKEND=claude, importing server binds ``server.translate``
+    # to pipeline.translate. This guards against a future refactor accidentally
+    # flipping the resolution. We force the env var to "claude" rather than
+    # unsetting it, because load_dotenv() in config.py would otherwise repopulate
+    # the dev's local .env override (e.g. TRANSLATION_BACKEND=local).
+    import importlib
+    monkeypatch.setenv("TRANSLATION_BACKEND", "claude")
+    import config
+    importlib.reload(config)
+    assert config.settings.TRANSLATION_BACKEND == "claude"
     import server
+    importlib.reload(server)
     assert server.translate.__name__ == "pipeline.translate", (
-        f"Default backend should be pipeline.translate; got {server.translate.__name__}. "
-        "Check TRANSLATION_BACKEND default in config.py."
+        f"Claude backend should resolve to pipeline.translate; got "
+        f"{server.translate.__name__}."
+    )
+
+
+def test_config_default_translation_backend_is_claude():
+    # Independent of the dev's local .env: the *source-level* default in
+    # config.py must be "claude". Parse the file rather than relying on the
+    # runtime settings (which load_dotenv would override).
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[1] / "config.py"
+    text = src.read_text(encoding="utf-8")
+    assert 'os.getenv("TRANSLATION_BACKEND", "claude")' in text, (
+        "config.py TRANSLATION_BACKEND default must be 'claude' so existing "
+        "deployments keep using the Claude API path without an env change."
     )

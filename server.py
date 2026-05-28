@@ -419,9 +419,10 @@ async def run_pipeline_async(audio_path: Path, language: str) -> list[Segment]:
 @app.on_event("startup")
 async def warmup() -> None:
     log.info(
-        "Starting up. model=%s device=%s target_language=%s gender_aware=%s",
+        "Starting up. model=%s device=%s target_language=%s gender_aware=%s "
+        "translation_backend=%s",
         settings.WHISPER_MODEL, settings.DEVICE, settings.TARGET_LANGUAGE,
-        settings.is_gender_aware(),
+        settings.is_gender_aware(), settings.TRANSLATION_BACKEND,
     )
     tmp = Path(tempfile.gettempdir()) / f"warmup_{uuid.uuid4().hex}.wav"
     try:
@@ -433,6 +434,11 @@ async def warmup() -> None:
                 log.info("Pyannote warm-up complete.")
             except Exception:
                 log.exception("Pyannote warm-up failed (continuing anyway).")
+        # Local translation model is large (NLLB-200 distilled is ~2.4 GB) and
+        # would otherwise load on the first /asr request — well past Bazarr's
+        # client timeout. Pre-load it here. Claude backend has nothing to warm.
+        if settings.TRANSLATION_BACKEND.strip().lower() == "local":
+            await run_in_thread(translate.warmup)
     finally:
         tmp.unlink(missing_ok=True)
 
