@@ -154,6 +154,13 @@ All settings come from environment variables (or a `.env` file). See `.env.examp
 | `SAVE_SRT_VIDEO_PREFIX`| —                  | Client's view of the share root (e.g. `/media`). Empty = disabled     |
 | `SAVE_SRT_LOCAL_PREFIX`| —                  | Server's view of the same root (e.g. `Z:\media`). Empty = disabled    |
 | `SAVE_SRT_SUFFIX`    | `.he.srt`            | Replaces the video extension on the written side-file                 |
+| `TRANSLATION_BACKEND`| `claude`             | `claude` (Anthropic API) or `local` (HuggingFace model on this GPU)   |
+| `LOCAL_TRANSLATION_MODEL` | `facebook/nllb-200-distilled-600M` | HF model ID for the local backend                       |
+| `LOCAL_TRANSLATION_DEVICE`| `cuda`           | `cuda` or `cpu` (auto-falls-back if CUDA unavailable)                 |
+| `LOCAL_TRANSLATION_DTYPE` | `float16`        | `float16` or `float32` (halve VRAM with fp16)                          |
+| `LOCAL_BATCH_SIZE`   | `16`                 | Segments per forward pass on the local model                          |
+| `LOCAL_MAX_LENGTH`   | `512`                | Max output tokens per segment                                          |
+| `LOCAL_USE_GENDER_PREFIX` | `false`          | Prepend a best-effort gender hint to the source text (opt-in)         |
 | `DEBUG`              | `false`              | Verbose logging                                                        |
 
 **Gender-aware languages** (full diarization + gender pipeline): Hebrew, Arabic, French, Spanish,
@@ -168,6 +175,38 @@ overrides the output language (Hebrew here), the filename mislabels its contents
 takes Bazarr's `video_file` query parameter, translates the path from the client's view of
 the share to the server's view, and writes a copy of the SRT with `SAVE_SRT_SUFFIX` next to
 the source video. Failures are logged but never break the HTTP response.
+
+### Local translation backend (optional)
+
+Set `TRANSLATION_BACKEND=local` in `.env` to translate with a HuggingFace seq2seq model on
+this same GPU instead of calling the Anthropic API. Everything else stays the same — the
+chunked pipeline, diarization, and gender-aware grouping are unchanged. **`claude` is and
+remains the default**; this section only applies when you opt in.
+
+**VRAM budget.** Whisper `large-v3` (~4.5 GB) and pyannote (~1–1.5 GB) are already resident,
+so the local translation model has to fit in ~2 GB of remaining headroom on an 8 GB card.
+The default (`facebook/nllb-200-distilled-600M` at `float16`) needs ~1.2 GB and works. Larger
+models (NLLB-1.3B, NLLB-3.3B, MADLAD-400-3B) will not fit — the server runs an explicit VRAM
+check at load time and **raises a clear error at startup** rather than OOM-crashing mid-request,
+so you'll see the problem in the log before the first request lands. The lightweight fallback
+is `Helsinki-NLP/opus-mt-en-he` (~300 MB, en→he only, ~10× faster, lower quality).
+
+**No Anthropic key required.** When `TRANSLATION_BACKEND=local` the server doesn't call
+`get_async_anthropic_client()` and `ANTHROPIC_API_KEY` is no longer required. `HF_TOKEN` is
+reused for any gated model downloads (most translation models are public).
+
+**Gender hint is best-effort here.** The Claude backend asks the model to use grammatically
+correct male/female forms and steers the second-person addressee via the addressee_gender
+hint. Local seq2seq models (Marian, NLLB) are *not* instruction-followers — they translate
+the source text token-for-token. With `LOCAL_USE_GENDER_PREFIX=true` the server prepends
+`"Translate to Hebrew (male speaker): "` to each input as a best-effort hint, but the model
+may translate the prefix literally instead of obeying it. Leave it off unless you've
+measured a benefit on your specific model.
+
+**Switching.** `set TRANSLATION_BACKEND=local` in `.env`, restart the server. First request
+after restart will be slow (downloads model weights to the default HF cache at
+`~/.cache/huggingface`); subsequent requests reuse the cached weights and the warm
+in-process singleton.
 
 ## Running
 
