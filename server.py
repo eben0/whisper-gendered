@@ -198,30 +198,34 @@ def _diarize_and_gender(audio: np.ndarray, sr: int, start: float, end: float):
 
 async def _translate_chunk(
     idx: int,
-    chunk,
-    annotation,
+    groups: list[tuple[str | None, list[Segment]]],
     genders: dict[str, str],
     target: str,
     client,
     sem: asyncio.Semaphore,
+    prev_speaker_gender: str | None,
 ) -> None:
-    """Translate one chunk's segments in place, grouped by speaker + gender."""
+    """Translate one chunk's pre-built speaker groups in place.
+
+    ``groups`` is the output of ``_group_consecutive`` for this chunk's segments
+    (built by the orchestrator so it can also derive the chunk's last-group
+    gender for cross-chunk carry). ``prev_speaker_gender`` seeds the addressee
+    rotation: the first group's addressee is "whoever spoke before this chunk"
+    (or ``None`` for the very first chunk).
+    """
     async with sem:
-        assigned: list[tuple[Segment, str | None]] = []
-        for seg in chunk.segments:
-            # `local` has chunk-relative times for assign_speaker (the chunk's
-            # diarization annotation is in slice-local time); `seg` is the
-            # original object we mutate with the translated text below.
-            local = Segment(seg.start - chunk.start, seg.end - chunk.start, seg.text)
-            assigned.append((seg, diarize.assign_speaker(local, annotation)))
+        prev_group_gender = prev_speaker_gender
         try:
-            for speaker, group in _group_consecutive(assigned):
+            for speaker, group in groups:
                 spk_gender = genders.get(speaker, "male") if speaker else "male"
+                addressee = prev_group_gender
                 translated = await translate.translate_batch_async(
-                    [s.text for s in group], spk_gender, target, client
+                    [s.text for s in group], spk_gender, target, client,
+                    addressee_gender=addressee,
                 )
                 for seg, text in zip(group, translated):
                     seg.text = text
+                prev_group_gender = spk_gender
         except Exception:
             log.exception("[chunk %d] translation failed", idx)
             raise
@@ -237,6 +241,7 @@ async def _run_gender_aware(
     chunks = make_chunks(segments, settings.CHUNK_DURATION_SEC)
     sem = asyncio.Semaphore(settings.TRANSLATE_CONCURRENCY)
     tasks: list[asyncio.Task] = []
+    prev_speaker_gender: str | None = None
     t1 = time.monotonic()
     try:
         for idx, chunk in enumerate(chunks):
@@ -247,14 +252,26 @@ async def _run_gender_aware(
                 "chunk %d/%d diarize+gender done (%d speakers)",
                 idx + 1, len(chunks), len(genders),
             )
+            # Build chunk-local assignment + groups here so we know the chunk's
+            # last group's speaker gender (for the next chunk's addressee carry)
+            # before launching the translate task.
+            assigned: list[tuple[Segment, str | None]] = []
+            for seg in chunk.segments:
+                local = Segment(seg.start - chunk.start, seg.end - chunk.start, seg.text)
+                assigned.append((seg, diarize.assign_speaker(local, annotation)))
+            groups = _group_consecutive(assigned)
             tasks.append(asyncio.create_task(
-                _translate_chunk(idx, chunk, annotation, genders, target, client, sem)
+                _translate_chunk(idx, groups, genders, target, client, sem, prev_speaker_gender)
             ))
+            # Carry: the next chunk's first group's addressee is this chunk's
+            # final group's speaker gender.
+            if groups:
+                last_speaker = groups[-1][0]
+                prev_speaker_gender = (
+                    genders.get(last_speaker, "male") if last_speaker else "male"
+                )
         await asyncio.gather(*tasks)
     except BaseException:
-        # Diarize raised mid-loop OR a translate task failed: cancel any
-        # still-pending translations so they don't keep calling Claude after
-        # the caller has already received an error.
         for t in tasks:
             if not t.done():
                 t.cancel()
