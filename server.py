@@ -96,21 +96,9 @@ _semaphore = asyncio.Semaphore(settings.CONCURRENT_JOBS)
 _executor = ThreadPoolExecutor(max_workers=max(2, settings.CONCURRENT_JOBS + 1))
 _jobs_in_system = 0  # queued + running, for /status
 
-# Lazily-created Anthropic client (only when translation is enabled).
-_anthropic_client = None
-
-
 async def run_in_thread(fn, *args):
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_executor, fn, *args)
-
-
-def get_anthropic_client():
-    global _anthropic_client
-    if _anthropic_client is None:
-        import anthropic
-        _anthropic_client = anthropic.Anthropic(api_key=settings.require_anthropic_key())
-    return _anthropic_client
 
 
 _async_anthropic_client = None
@@ -208,11 +196,22 @@ def _diarize_and_gender(audio: np.ndarray, sr: int, start: float, end: float):
     return annotation, genders
 
 
-async def _translate_chunk(idx, chunk, annotation, genders, target, client, sem):
+async def _translate_chunk(
+    idx: int,
+    chunk,
+    annotation,
+    genders: dict[str, str],
+    target: str,
+    client,
+    sem: asyncio.Semaphore,
+) -> None:
     """Translate one chunk's segments in place, grouped by speaker + gender."""
     async with sem:
         assigned: list[tuple[Segment, str | None]] = []
         for seg in chunk.segments:
+            # `local` has chunk-relative times for assign_speaker (the chunk's
+            # diarization annotation is in slice-local time); `seg` is the
+            # original object we mutate with the translated text below.
             local = Segment(seg.start - chunk.start, seg.end - chunk.start, seg.text)
             assigned.append((seg, diarize.assign_speaker(local, annotation)))
         try:
@@ -228,29 +227,48 @@ async def _translate_chunk(idx, chunk, annotation, genders, target, client, sem)
             raise
 
 
-async def _run_gender_aware(audio_path, segments, target, client):
+async def _run_gender_aware(
+    audio_path: Path,
+    segments: list[Segment],
+    target: str,
+    client,
+) -> list[Segment]:
     audio, sr = await run_in_thread(_load_wav_mono, audio_path)
     chunks = make_chunks(segments, settings.CHUNK_DURATION_SEC)
     sem = asyncio.Semaphore(settings.TRANSLATE_CONCURRENCY)
-    tasks = []
+    tasks: list[asyncio.Task] = []
     t1 = time.monotonic()
-    for idx, chunk in enumerate(chunks):
-        annotation, genders = await run_in_thread(
-            _diarize_and_gender, audio, sr, chunk.start, chunk.end
-        )
-        log.info(
-            "chunk %d/%d diarize+gender done (%d speakers)",
-            idx + 1, len(chunks), len(genders),
-        )
-        tasks.append(asyncio.create_task(
-            _translate_chunk(idx, chunk, annotation, genders, target, client, sem)
-        ))
-    await asyncio.gather(*tasks)
+    try:
+        for idx, chunk in enumerate(chunks):
+            annotation, genders = await run_in_thread(
+                _diarize_and_gender, audio, sr, chunk.start, chunk.end
+            )
+            log.info(
+                "chunk %d/%d diarize+gender done (%d speakers)",
+                idx + 1, len(chunks), len(genders),
+            )
+            tasks.append(asyncio.create_task(
+                _translate_chunk(idx, chunk, annotation, genders, target, client, sem)
+            ))
+        await asyncio.gather(*tasks)
+    except BaseException:
+        # Diarize raised mid-loop OR a translate task failed: cancel any
+        # still-pending translations so they don't keep calling Claude after
+        # the caller has already received an error.
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
     log.info("gender-aware chunks complete: %.1fs", time.monotonic() - t1)
     return [seg for chunk in chunks for seg in chunk.segments]
 
 
-async def _run_plain_translate(segments, target, client):
+async def _run_plain_translate(
+    segments: list[Segment],
+    target: str,
+    client,
+) -> list[Segment]:
     chunks = make_chunks(segments, settings.CHUNK_DURATION_SEC)
     sem = asyncio.Semaphore(settings.TRANSLATE_CONCURRENCY)
 
@@ -262,7 +280,15 @@ async def _run_plain_translate(segments, target, client):
             for seg, text in zip(chunk.segments, translated):
                 seg.text = text
 
-    await asyncio.gather(*(translate_one(c) for c in chunks))
+    tasks = [asyncio.create_task(translate_one(c)) for c in chunks]
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
     return [seg for chunk in chunks for seg in chunk.segments]
 
 

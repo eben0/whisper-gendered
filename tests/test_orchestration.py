@@ -52,6 +52,7 @@ async def test_plain_translate_no_diarization(monkeypatch, two_chunk_segments):
     _install_fakes(monkeypatch, two_chunk_segments, gender_aware=False)
     # If diarization were called in the plain path this would raise.
     monkeypatch.setattr(server.diarize, "diarize_waveform", lambda *a: (_ for _ in ()).throw(AssertionError("diarize called in plain path")))
+    monkeypatch.setattr(server, "_load_wav_mono", lambda *a: (_ for _ in ()).throw(AssertionError("_load_wav_mono called in plain path")))
     out = await server.run_pipeline_async(server.Path("ignored.wav"), "en")
     assert [s.text for s in out] == ["hello|None", "world|None"]
 
