@@ -76,7 +76,16 @@ from fastapi import FastAPI, File, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from config import settings
-from pipeline import diarize, gender, transcribe, translate
+from pipeline import diarize, gender, transcribe
+# Backend factory: at import time, ``translate`` points at the module whose
+# ``translate_batch_async`` matches the requested TRANSLATION_BACKEND. Both
+# modules expose the same call signature, so the orchestrator's call site at
+# ``translate.translate_batch_async(...)`` is unchanged either way.
+# ``client`` is ignored by the local backend; the Claude backend uses it.
+if settings.TRANSLATION_BACKEND.strip().lower() == "local":
+    from pipeline import translate_local as translate  # type: ignore[no-redef]
+else:
+    from pipeline import translate  # type: ignore[no-redef]
 from pipeline.chunk import make_chunks
 from pipeline.format import render
 from pipeline.transcribe import Segment
@@ -377,7 +386,13 @@ async def run_pipeline_async(audio_path: Path, language: str) -> list[Segment]:
         return segments
 
     target = settings.TARGET_LANGUAGE
-    client = get_async_anthropic_client()
+    # Only the Claude backend needs an Anthropic client; the local backend
+    # ignores the parameter. Skipping the call also avoids requiring
+    # ANTHROPIC_API_KEY when running fully on-device.
+    if settings.TRANSLATION_BACKEND.strip().lower() == "local":
+        client = None
+    else:
+        client = get_async_anthropic_client()
     if settings.is_gender_aware():
         return await _run_gender_aware(audio_path, segments, target, client)
     return await _run_plain_translate(segments, target, client)
