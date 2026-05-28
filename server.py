@@ -72,7 +72,7 @@ _preimport_librosa()
 
 import numpy as np
 import soundfile as sf
-from fastapi import FastAPI, File, Query, UploadFile
+from fastapi import FastAPI, File, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from config import settings
@@ -157,6 +157,57 @@ def prepare_unencoded(src: Path, dst: Path, sr: int = 16000) -> None:
 
 def _write_silent_wav(path: Path, seconds: float = 1.0, sr: int = 16000) -> None:
     sf.write(str(path), np.zeros(int(seconds * sr), dtype=np.float32), sr)
+
+
+def _compute_side_file_path(
+    video_file_url: str,
+    src_prefix: str,
+    dst_prefix: str,
+    suffix: str,
+) -> Path | None:
+    """Translate the Bazarr ``video_file`` URL into a local SRT path on the share.
+
+    Returns ``None`` when the feature is disabled (either prefix empty), the URL
+    is empty, or the URL does not start with the configured source prefix.
+    Pure function — no filesystem I/O — so it is unit-testable without mounting
+    a share. The actual write happens in ``_try_save_side_file``.
+    """
+    if not src_prefix or not dst_prefix or not video_file_url:
+        return None
+    import urllib.parse
+    decoded = urllib.parse.unquote(video_file_url)
+    if not decoded.startswith(src_prefix):
+        return None
+    rel = decoded[len(src_prefix):].replace("/", "\\")
+    local = Path(dst_prefix + rel)
+    stem = local.with_suffix("")
+    return stem.with_name(stem.name + suffix)
+
+
+def _try_save_side_file(body: str, video_file_url: str) -> None:
+    """Write the SRT body to the translated path next to the source video.
+
+    Failures (missing share, permission denied, malformed URL) log a warning
+    and do not affect the HTTP response. Atomic-ish: write to ``<target>.tmp``
+    first, then ``os.replace`` onto the final name.
+    """
+    try:
+        target = _compute_side_file_path(
+            video_file_url,
+            settings.SAVE_SRT_VIDEO_PREFIX,
+            settings.SAVE_SRT_LOCAL_PREFIX,
+            settings.SAVE_SRT_SUFFIX,
+        )
+        if target is None:
+            return
+        tmp = target.with_name(target.name + ".tmp")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(body, encoding="utf-8")
+        import os as _os
+        _os.replace(str(tmp), str(target))
+        log.info("side-file saved: %s", target)
+    except Exception:
+        log.exception("side-file save failed; continuing without it")
 
 
 # --------------------------------------------------------------------------- #
@@ -357,6 +408,7 @@ async def status():
 
 @app.post("/asr")
 async def asr(
+    request: Request,
     audio_file: UploadFile = File(...),
     task: str = Query("transcribe"),
     language: str = Query("en"),
@@ -386,6 +438,12 @@ async def asr(
             segments = await run_pipeline_async(audio_path, language)
 
         body, content_type = render(segments, output)
+        # Optional: also write a copy of the SRT next to the source video on
+        # the share, so we get a deterministic .he.srt artifact regardless of
+        # how the calling client names its own save. Best-effort: failures log
+        # but do not affect the HTTP response.
+        video_file_url = request.query_params.get("video_file") or ""
+        await run_in_thread(_try_save_side_file, body, video_file_url)
         log.info("[%s] done in %.1fs (%d segments)",
                  request_id, time.monotonic() - started, len(segments))
         return PlainTextResponse(body, media_type=content_type)

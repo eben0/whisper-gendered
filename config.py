@@ -64,6 +64,14 @@ class Settings:
     CHUNK_DURATION_SEC: int = _env_int("CHUNK_DURATION_SEC", 300)
     TRANSLATE_CONCURRENCY: int = _env_int("TRANSLATE_CONCURRENCY", 3)
     CLAUDE_MAX_RETRIES: int = _env_int("CLAUDE_MAX_RETRIES", 4)
+    # Optional side-file save: write the produced SRT directly next to the
+    # source video on a mounted share, in addition to whatever the calling
+    # client does. Disabled unless both prefixes are set. Useful when the
+    # client (e.g. Bazarr) names its saved file based on the requested source
+    # language and the actual output language differs (TARGET_LANGUAGE override).
+    SAVE_SRT_VIDEO_PREFIX: str = os.getenv("SAVE_SRT_VIDEO_PREFIX", "")
+    SAVE_SRT_LOCAL_PREFIX: str = os.getenv("SAVE_SRT_LOCAL_PREFIX", "")
+    SAVE_SRT_SUFFIX: str = os.getenv("SAVE_SRT_SUFFIX", ".he.srt")
     DEBUG: bool = _env_bool("DEBUG", False)
 
     def translation_enabled(self) -> bool:
