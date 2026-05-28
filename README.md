@@ -35,6 +35,15 @@ Gender is detected per speaker from median fundamental frequency (F0) via `libro
 Translation is **batched**: consecutive lines from the same speaker go in one Claude call, which
 preserves cross-line context and turns a ~1500-call feature film into a few dozen calls.
 
+**Chunked overlap (translated output):** when translating, the file is transcribed
+whole, then the resulting segments are split into ~`CHUNK_DURATION_SEC` chunks.
+Per chunk, diarization runs on that slice while the previous chunk's translation
+is still calling the Claude API — so GPU work overlaps the network-bound translate
+phase. Per-chunk diarization also lowers peak VRAM (a few-minute slice instead of
+the full file). Up to `TRANSLATE_CONCURRENCY` chunk translations run at once; the
+Anthropic SDK retries transient errors (429/529/connection) up to
+`CLAUDE_MAX_RETRIES` times.
+
 ## Requirements
 
 - Windows with an NVIDIA GPU (developed for an RTX 2070, 8 GB VRAM). CPU works but is slow.
@@ -138,6 +147,9 @@ All settings come from environment variables (or a `.env` file). See `.env.examp
 | `ANTHROPIC_API_KEY`  | —                    | Anthropic API key (required when translating)                          |
 | `CLAUDE_MODEL`       | `claude-sonnet-4-6`  | Claude model used for translation                                      |
 | `GENDER_THRESHOLD_HZ`| `165`                | F0 (Hz) boundary between male and female                               |
+| `CHUNK_DURATION_SEC` | `300`                | Target seconds of audio per pipeline chunk                            |
+| `TRANSLATE_CONCURRENCY`| `3`                | Max chunk translations running concurrently (Claude)                  |
+| `CLAUDE_MAX_RETRIES` | `4`                  | Anthropic SDK auto-retry attempts on 429/529/connection errors        |
 | `DEBUG`              | `false`              | Verbose logging                                                        |
 
 **Gender-aware languages** (full diarization + gender pipeline): Hebrew, Arabic, French, Spanish,
