@@ -151,12 +151,23 @@ All settings come from environment variables (or a `.env` file). See `.env.examp
 | `TRANSLATE_CONCURRENCY`| `3`                | Max chunk translations running concurrently (Claude)                  |
 | `CLAUDE_MAX_RETRIES` | `4`                  | Anthropic SDK auto-retry attempts on 429/529/connection errors        |
 | `ADDRESSEE_GENDER_HINT_ENABLED` | `true`    | Pass the prior group's speaker gender as an addressee hint to Claude  |
+| `SAVE_SRT_VIDEO_PREFIX`| —                  | Client's view of the share root (e.g. `/media`). Empty = disabled     |
+| `SAVE_SRT_LOCAL_PREFIX`| —                  | Server's view of the same root (e.g. `Z:\media`). Empty = disabled    |
+| `SAVE_SRT_SUFFIX`    | `.he.srt`            | Replaces the video extension on the written side-file                 |
 | `DEBUG`              | `false`              | Verbose logging                                                        |
 
 **Gender-aware languages** (full diarization + gender pipeline): Hebrew, Arabic, French, Spanish,
 Italian, Portuguese, German, Russian, Polish, Ukrainian, Hindi, Romanian. Any other
 `TARGET_LANGUAGE` translates without diarization. `none` disables translation entirely (plain
 Whisper ASR server).
+
+**Side-file save (optional).** Bazarr names its saved subtitle by the source-audio language
+(e.g. `…en.srt`), regardless of what the server actually returned. When `TARGET_LANGUAGE`
+overrides the output language (Hebrew here), the filename mislabels its contents. Set
+`SAVE_SRT_VIDEO_PREFIX` and `SAVE_SRT_LOCAL_PREFIX` to enable a parallel save: the server
+takes Bazarr's `video_file` query parameter, translates the path from the client's view of
+the share to the server's view, and writes a copy of the SRT with `SAVE_SRT_SUFFIX` next to
+the source video. Failures are logged but never break the HTTP response.
 
 ## Running
 

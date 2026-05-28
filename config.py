@@ -69,6 +69,14 @@ class Settings:
     # disable that specific hint while keeping the broader "you"-form guidance
     # in the system prompt — useful for A/B testing the addressee feature.
     ADDRESSEE_GENDER_HINT_ENABLED: bool = _env_bool("ADDRESSEE_GENDER_HINT_ENABLED", True)
+    # Optional side-file save: write the produced SRT directly next to the
+    # source video on a mounted share, in addition to whatever the calling
+    # client does. Disabled unless both prefixes are set. Useful when the
+    # client (e.g. Bazarr) names its saved file based on the requested source
+    # language and the actual output language differs (TARGET_LANGUAGE override).
+    SAVE_SRT_VIDEO_PREFIX: str = os.getenv("SAVE_SRT_VIDEO_PREFIX", "")
+    SAVE_SRT_LOCAL_PREFIX: str = os.getenv("SAVE_SRT_LOCAL_PREFIX", "")
+    SAVE_SRT_SUFFIX: str = os.getenv("SAVE_SRT_SUFFIX", ".he.srt")
     DEBUG: bool = _env_bool("DEBUG", False)
 
     def translation_enabled(self) -> bool:
