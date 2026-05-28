@@ -524,14 +524,36 @@ async def _run_plain_translate(
     return [seg for chunk in chunks for seg in chunk.segments]
 
 
-async def run_pipeline_async(audio_path: Path, language: str) -> list[Segment]:
-    """Transcribe and (optionally) translate, overlapping diarize and translate."""
+async def run_pipeline_async(
+    audio_path: Path, language: str
+) -> tuple[list[Segment], list[Segment] | None]:
+    """Transcribe and (optionally) translate, overlapping diarize and translate.
+
+    Returns ``(source_segments, target_segments_or_None)``. ``source_segments``
+    is the raw transcript (in the request's ``language``); ``target_segments``
+    is the translation when ``TARGET_LANGUAGE`` is enabled, else ``None``.
+
+    Keeping both lists lets the HTTP response return the *source* transcript —
+    matching whatever language Bazarr asked for in ``?language=en`` — while the
+    translation is written only to the configured side-file. Without this,
+    Bazarr's whisperai plugin stores our response body to disk under a filename
+    derived from the requested language (e.g. ``*.en.srt``), and a Hebrew body
+    would clobber any pre-existing English subtitle there.
+    """
     t0 = time.monotonic()
     segments = await run_in_thread(transcribe.transcribe, audio_path, language)
     log.info("transcribe: %d segments in %.1fs", len(segments), time.monotonic() - t0)
 
     if not settings.translation_enabled() or not segments:
-        return segments
+        return segments, None
+
+    # Snapshot the source-language text BEFORE the pipeline mutates each
+    # Segment in place. The chunk/orchestrator layers reuse the input
+    # Segment instances (``make_chunks`` does not copy), so by the time the
+    # translation finishes ``segments[i].text`` holds the target language.
+    # Reconstructing the source list from this snapshot is cheaper and less
+    # invasive than threading a "no-mutation" mode through three call sites.
+    source_texts = [s.text for s in segments]
 
     target = settings.TARGET_LANGUAGE
     # The audio's source language: Bazarr sends an ISO 639-1 code in `language`;
@@ -546,8 +568,23 @@ async def run_pipeline_async(audio_path: Path, language: str) -> list[Segment]:
     else:
         client = get_async_anthropic_client()
     if settings.is_gender_aware():
-        return await _run_gender_aware(audio_path, segments, target, client, source_language)
-    return await _run_plain_translate(segments, target, client, source_language)
+        target_segments = await _run_gender_aware(
+            audio_path, segments, target, client, source_language,
+        )
+    else:
+        target_segments = await _run_plain_translate(
+            segments, target, client, source_language,
+        )
+
+    # Pair the snapshotted source text with the (now-translated) instants so
+    # both lists share start/end stamps but carry different ``.text``. New
+    # Segment instances guarantee independence: a later mutation to one list
+    # cannot leak into the other.
+    source_segments = [
+        Segment(t.start, t.end, src)
+        for t, src in zip(target_segments, source_texts)
+    ]
+    return source_segments, target_segments
 
 
 # --------------------------------------------------------------------------- #
@@ -640,42 +677,51 @@ async def asr(
             # transcribe step (CUDA error: out of memory) even though both
             # requests fit individually when the process is fresh.
             _empty_cuda_cache()
-            segments = await run_pipeline_async(audio_path, language)
+            source_segments, target_segments = await run_pipeline_async(
+                audio_path, language,
+            )
 
-        body, content_type = render(segments, output)
+        # The HTTP response carries the SOURCE-language transcript so Bazarr's
+        # whisperai plugin writes the response to its language-matching path
+        # (e.g. ``*.en.srt``) with source-language content. The translation
+        # — when present — only lands at the configured side-file path, so
+        # pre-existing English subtitle files are never overwritten by Hebrew.
+        body, content_type = render(source_segments, output)
         wall = time.monotonic() - started
-
-        # Build a human-readable summary of the run — most importantly the
-        # target-script ratio, which would have caught the day-1 NLLB mis-
-        # translation bug instantly. Logged regardless; written to disk only
-        # when the side-file feature is configured.
-        backend = settings.TRANSLATION_BACKEND
-        backend_model = (
-            settings.LOCAL_TRANSLATION_MODEL
-            if backend.strip().lower() == "local"
-            else settings.CLAUDE_MODEL
-        )
         video_file_url = request.query_params.get("video_file") or ""
-        summary = _build_translation_summary(
-            request_id=request_id,
-            video_file_url=video_file_url,
-            source_language_iso=language,
-            source_language_name=language_name(language),
-            target_language=settings.TARGET_LANGUAGE,
-            backend=backend,
-            backend_model=backend_model,
-            segments=segments,
-            wall_seconds=wall,
-        )
-        log.info("[%s] %s", request_id, summary.replace("\n", "\n[" + request_id + "] "))
 
-        # Optional: also write a copy of the SRT — and the summary — next to
-        # the source video on the share, so we get deterministic artifacts
-        # regardless of how the calling client names its own save. Best-
-        # effort: failures log but do not affect the HTTP response.
-        await run_in_thread(_try_save_side_file, body, summary, video_file_url)
+        if target_segments is not None:
+            # Translated run: render the translation separately for the side-
+            # file save, and build the summary from the translated segments so
+            # the script-check ratio remains meaningful.
+            target_body, _ = render(target_segments, output)
+            backend = settings.TRANSLATION_BACKEND
+            backend_model = (
+                settings.LOCAL_TRANSLATION_MODEL
+                if backend.strip().lower() == "local"
+                else settings.CLAUDE_MODEL
+            )
+            summary = _build_translation_summary(
+                request_id=request_id,
+                video_file_url=video_file_url,
+                source_language_iso=language,
+                source_language_name=language_name(language),
+                target_language=settings.TARGET_LANGUAGE,
+                backend=backend,
+                backend_model=backend_model,
+                segments=target_segments,
+                wall_seconds=wall,
+            )
+            log.info(
+                "[%s] %s",
+                request_id, summary.replace("\n", "\n[" + request_id + "] "),
+            )
+            await run_in_thread(
+                _try_save_side_file, target_body, summary, video_file_url,
+            )
+
         log.info("[%s] done in %.1fs (%d segments)",
-                 request_id, wall, len(segments))
+                 request_id, wall, len(source_segments))
         return PlainTextResponse(body, media_type=content_type)
     finally:
         _jobs_in_system -= 1
