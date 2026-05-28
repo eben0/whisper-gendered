@@ -119,6 +119,14 @@ async def test_translate_batch_async_serialises_concurrent_calls(monkeypatch):
     # — we simulate the panic with a fake tokenizer that explodes when entered
     # while another thread is still inside it. With the lock in place, both
     # calls complete; without it, this test would raise.
+    #
+    # v2: the fake tokenizer ALSO has a ``src_lang`` property setter (and a
+    # ``convert_tokens_to_ids`` method) that share the same borrow state as
+    # ``__call__``. The v1 of this test only proxied ``__call__``, so the
+    # production NLLB tokenizer's ``src_lang`` mutation racing with a sibling
+    # thread's ``tokenizer(batch)`` was not exercised — exactly the bug that
+    # slipped through to production after the v1 fix. With the v2 lock that
+    # also covers src_lang/convert_tokens_to_ids, both calls complete.
     import asyncio
     import threading
 
@@ -126,29 +134,74 @@ async def test_translate_batch_async_serialises_concurrent_calls(monkeypatch):
     max_concurrent = 0
     lock_witness = threading.Lock()
 
-    class _RaceTokenizer:
-        def __call__(self, texts, **kwargs):
+    class _Race:
+        @staticmethod
+        def _enter(label: str):
             nonlocal entered, max_concurrent
             with lock_witness:
                 entered += 1
                 max_concurrent = max(max_concurrent, entered)
                 if entered > 1:
-                    # Mimic the HF Rust panic so any future regression that
-                    # drops the lock surfaces here with the same shape.
-                    raise RuntimeError("Already borrowed")
+                    # Mimic the HF Rust panic. ``label`` makes a regression
+                    # easy to attribute (call vs src_lang vs convert).
+                    raise RuntimeError(
+                        f"Already borrowed (concurrent {label})"
+                    )
+
+        @staticmethod
+        def _leave():
+            nonlocal entered
+            with lock_witness:
+                entered -= 1
+
+    class _RaceTokenizer:
+        # Mark as NLLB so the production code's _is_nllb_tokenizer branch
+        # fires and actually exercises src_lang + convert_tokens_to_ids.
+        __name__ = "NllbTokenizer"
+
+        def __init__(self):
+            self._src_lang = "eng_Latn"
+
+        # Class name lookup uses ``type(tok).__name__``; override the class
+        # name so production detection treats this as NLLB.
+        @property
+        def src_lang(self):
+            return self._src_lang
+
+        @src_lang.setter
+        def src_lang(self, value):
+            _Race._enter("src_lang setter")
             try:
-                # Hold the tokenizer "open" long enough that the sibling thread
-                # would race in without the inference lock.
+                import time
+                time.sleep(0.01)
+                self._src_lang = value
+            finally:
+                _Race._leave()
+
+        def convert_tokens_to_ids(self, token):
+            _Race._enter("convert_tokens_to_ids")
+            try:
+                import time
+                time.sleep(0.01)
+                return 256067  # heb_Hebr's real id, arbitrary here
+            finally:
+                _Race._leave()
+
+        def __call__(self, texts, **kwargs):
+            _Race._enter("__call__")
+            try:
                 import time
                 time.sleep(0.05)
                 return _FakeInputs(input_ids=list(range(len(texts))))
             finally:
-                with lock_witness:
-                    entered -= 1
+                _Race._leave()
 
         def batch_decode(self, ids, **kwargs):
             return [f"HE:{i}" for i in range(len(ids))]
 
+    # Coerce type().__name__ to start with "Nllb" so _is_nllb_tokenizer
+    # returns True (it keys on the class name).
+    _RaceTokenizer.__name__ = "NllbTokenizer"
     fake_tok = _RaceTokenizer()
     fake_model = _FakeModel()
     fake_model.generate = lambda **kw: [None]
@@ -165,7 +218,7 @@ async def test_translate_batch_async_serialises_concurrent_calls(monkeypatch):
     )
     assert all(r == ["HE:0"] for r in results)
     assert max_concurrent == 1, (
-        f"_inference_lock failed to serialise tokenizer calls "
+        f"_inference_lock failed to serialise tokenizer access "
         f"(saw {max_concurrent} concurrent entries)"
     )
 

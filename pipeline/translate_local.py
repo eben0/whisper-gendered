@@ -221,31 +221,6 @@ def _translate_sync(
     model, tokenizer = get_model_and_tokenizer()
     device = next(model.parameters()).device
 
-    # NLLB needs the source-language tag on the tokenizer and a forced target
-    # BOS token at generate-time. MarianMT ignores both.
-    forced_bos: int | None = None
-    if _is_nllb_tokenizer(tokenizer):
-        src_code = NLLB_LANGUAGE_CODES.get(source_language)
-        if src_code is None:
-            log.warning(
-                "No NLLB language code mapped for source=%r; falling back to "
-                "eng_Latn. Add the mapping to NLLB_LANGUAGE_CODES in "
-                "pipeline/translate_local.py.",
-                source_language,
-            )
-            src_code = "eng_Latn"
-        tokenizer.src_lang = src_code
-        target_code = NLLB_LANGUAGE_CODES.get(target_language)
-        if target_code is None:
-            log.warning(
-                "No NLLB language code mapped for target=%r; generation will "
-                "fall back to the model's default target. Add it to "
-                "NLLB_LANGUAGE_CODES in pipeline/translate_local.py.",
-                target_language,
-            )
-        else:
-            forced_bos = tokenizer.convert_tokens_to_ids(target_code)
-
     out: list[str] = []
     bsz = max(1, settings.LOCAL_BATCH_SIZE)
     max_len = max(1, settings.LOCAL_MAX_LENGTH)
@@ -253,7 +228,38 @@ def _translate_sync(
     # The whole tokenise+generate+decode path holds the lock; releasing
     # between sub-batches would let another thread interleave its own
     # tokenizer call, which is exactly what triggers the Rust panic.
+    #
+    # NLLB language-tag setup (``tokenizer.src_lang = ...`` and
+    # ``convert_tokens_to_ids``) MUST also happen inside the lock — these
+    # mutate / read the same Rust-backed tokenizer state that
+    # ``tokenizer(batch, ...)`` borrows. Performing them outside the lock
+    # was the v1 mistake: thread A holds the lock and is inside
+    # ``tokenizer(batch)``; thread B (from another chunk's task) runs
+    # ``tokenizer.src_lang = ...`` outside the lock → "Already borrowed".
+    forced_bos: int | None = None
     with _inference_lock, torch.inference_mode():
+        if _is_nllb_tokenizer(tokenizer):
+            src_code = NLLB_LANGUAGE_CODES.get(source_language)
+            if src_code is None:
+                log.warning(
+                    "No NLLB language code mapped for source=%r; falling back to "
+                    "eng_Latn. Add the mapping to NLLB_LANGUAGE_CODES in "
+                    "pipeline/translate_local.py.",
+                    source_language,
+                )
+                src_code = "eng_Latn"
+            tokenizer.src_lang = src_code
+            target_code = NLLB_LANGUAGE_CODES.get(target_language)
+            if target_code is None:
+                log.warning(
+                    "No NLLB language code mapped for target=%r; generation will "
+                    "fall back to the model's default target. Add it to "
+                    "NLLB_LANGUAGE_CODES in pipeline/translate_local.py.",
+                    target_language,
+                )
+            else:
+                forced_bos = tokenizer.convert_tokens_to_ids(target_code)
+
         for i in range(0, len(texts), bsz):
             batch = [
                 _format_with_gender_hint(t, gender, target_language, source_language)
