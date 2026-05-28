@@ -77,6 +77,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from config import settings
 from pipeline import diarize, gender, transcribe, translate
+from pipeline.chunk import make_chunks
 from pipeline.format import render
 from pipeline.transcribe import Segment
 
@@ -110,6 +111,20 @@ def get_anthropic_client():
         import anthropic
         _anthropic_client = anthropic.Anthropic(api_key=settings.require_anthropic_key())
     return _anthropic_client
+
+
+_async_anthropic_client = None
+
+
+def get_async_anthropic_client():
+    global _async_anthropic_client
+    if _async_anthropic_client is None:
+        import anthropic
+        _async_anthropic_client = anthropic.AsyncAnthropic(
+            api_key=settings.require_anthropic_key(),
+            max_retries=settings.CLAUDE_MAX_RETRIES,
+        )
+    return _async_anthropic_client
 
 
 # --------------------------------------------------------------------------- #
@@ -171,46 +186,100 @@ def _group_consecutive(items: list[tuple[Segment, str | None]]) -> list[tuple[st
     return groups
 
 
-def run_pipeline(audio_path: Path, language: str) -> list[Segment]:
-    """Transcribe and (optionally) translate, returning final segments."""
+def _load_wav_mono(audio_path: Path) -> tuple[np.ndarray, int]:
+    """Load a WAV as a mono float32 waveform + sample rate."""
+    data, sr = sf.read(str(audio_path), dtype="float32", always_2d=False)
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    return data, sr
+
+
+def _diarize_and_gender(audio: np.ndarray, sr: int, start: float, end: float):
+    """Diarize one chunk's audio slice and detect per-speaker gender.
+
+    Runs in a worker thread (GPU work). The returned annotation and the gender
+    map are both in slice-local time (turn times relative to ``start``).
+    """
+    i0 = max(0, int(start * sr))
+    i1 = min(len(audio), int(end * sr))
+    slice_ = audio[i0:i1]
+    annotation = diarize.diarize_waveform(slice_, sr)
+    genders = gender.detect_genders(slice_, sr, annotation)
+    return annotation, genders
+
+
+async def _translate_chunk(idx, chunk, annotation, genders, target, client, sem):
+    """Translate one chunk's segments in place, grouped by speaker + gender."""
+    async with sem:
+        assigned: list[tuple[Segment, str | None]] = []
+        for seg in chunk.segments:
+            local = Segment(seg.start - chunk.start, seg.end - chunk.start, seg.text)
+            assigned.append((seg, diarize.assign_speaker(local, annotation)))
+        try:
+            for speaker, group in _group_consecutive(assigned):
+                spk_gender = genders.get(speaker, "male") if speaker else "male"
+                translated = await translate.translate_batch_async(
+                    [s.text for s in group], spk_gender, target, client
+                )
+                for seg, text in zip(group, translated):
+                    seg.text = text
+        except Exception:
+            log.exception("[chunk %d] translation failed", idx)
+            raise
+
+
+async def _run_gender_aware(audio_path, segments, target, client):
+    audio, sr = await run_in_thread(_load_wav_mono, audio_path)
+    chunks = make_chunks(segments, settings.CHUNK_DURATION_SEC)
+    sem = asyncio.Semaphore(settings.TRANSLATE_CONCURRENCY)
+    tasks = []
+    t1 = time.monotonic()
+    for idx, chunk in enumerate(chunks):
+        annotation, genders = await run_in_thread(
+            _diarize_and_gender, audio, sr, chunk.start, chunk.end
+        )
+        log.info(
+            "chunk %d/%d diarize+gender done (%d speakers)",
+            idx + 1, len(chunks), len(genders),
+        )
+        tasks.append(asyncio.create_task(
+            _translate_chunk(idx, chunk, annotation, genders, target, client, sem)
+        ))
+    await asyncio.gather(*tasks)
+    log.info("gender-aware chunks complete: %.1fs", time.monotonic() - t1)
+    return [seg for chunk in chunks for seg in chunk.segments]
+
+
+async def _run_plain_translate(segments, target, client):
+    chunks = make_chunks(segments, settings.CHUNK_DURATION_SEC)
+    sem = asyncio.Semaphore(settings.TRANSLATE_CONCURRENCY)
+
+    async def translate_one(chunk):
+        async with sem:
+            translated = await translate.translate_batch_async(
+                [s.text for s in chunk.segments], None, target, client
+            )
+            for seg, text in zip(chunk.segments, translated):
+                seg.text = text
+
+    await asyncio.gather(*(translate_one(c) for c in chunks))
+    return [seg for chunk in chunks for seg in chunk.segments]
+
+
+async def run_pipeline_async(audio_path: Path, language: str) -> list[Segment]:
+    """Transcribe and (optionally) translate, overlapping diarize and translate."""
     t0 = time.monotonic()
-    segments = transcribe.transcribe(audio_path, language=language)
+    segments = await run_in_thread(transcribe.transcribe, audio_path, language)
     log.info("transcribe: %d segments in %.1fs", len(segments), time.monotonic() - t0)
 
     if not settings.translation_enabled() or not segments:
         return segments
 
     target = settings.TARGET_LANGUAGE
-    client = get_anthropic_client()
-
+    client = get_async_anthropic_client()
     if settings.is_gender_aware():
-        t1 = time.monotonic()
-        annotation = diarize.diarize(audio_path)
-        genders = gender.detect_genders(audio_path, annotation)
-        log.info("diarize+gender: %.1fs %s", time.monotonic() - t1, genders)
-
-        assigned = [
-            (seg, diarize.assign_speaker(seg, annotation)) for seg in segments
-        ]
-        t2 = time.monotonic()
-        for speaker, group in _group_consecutive(assigned):
-            spk_gender = genders.get(speaker, "male") if speaker else "male"
-            translated = translate.translate_batch(
-                [s.text for s in group], spk_gender, target, client
-            )
-            for seg, text in zip(group, translated):
-                seg.text = text
-        log.info("translate (gendered): %.1fs", time.monotonic() - t2)
-    else:
-        t2 = time.monotonic()
-        translated = translate.translate_batch(
-            [s.text for s in segments], None, target, client
-        )
-        for seg, text in zip(segments, translated):
-            seg.text = text
-        log.info("translate (plain): %.1fs", time.monotonic() - t2)
-
-    return segments
+        return await _run_gender_aware(audio_path, segments, target, client)
+    return await _run_plain_translate(segments, target, client)
 
 
 # --------------------------------------------------------------------------- #
@@ -288,7 +357,7 @@ async def asr(
             await run_in_thread(prepare_unencoded, raw_path, audio_path)
 
         async with _semaphore:
-            segments = await run_in_thread(run_pipeline, audio_path, language)
+            segments = await run_pipeline_async(audio_path, language)
 
         body, content_type = render(segments, output)
         log.info("[%s] done in %.1fs (%d segments)",
