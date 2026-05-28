@@ -38,6 +38,17 @@ log = logging.getLogger("pipeline.translate_local")
 _model: Any | None = None
 _tokenizer: Any | None = None
 _lock = threading.Lock()
+# Separate lock that serialises inference calls. HuggingFace's Rust-backed
+# ``FastTokenizer`` uses interior mutability and panics with
+# ``RuntimeError: Already borrowed`` if two threads enter ``tokenizer(...)``
+# concurrently. The orchestrator's ``TRANSLATE_CONCURRENCY`` semaphore allows
+# multiple chunks to call ``translate_batch_async`` in parallel from different
+# worker threads (via ``asyncio.to_thread``), so we must serialise here. The
+# GPU is the bottleneck anyway — parallel forwards on a single CUDA stream
+# don't actually overlap — so serialising costs nothing in practice. The
+# Claude backend never hits this because its concurrent path is HTTP-bound
+# with no shared mutable state.
+_inference_lock = threading.Lock()
 
 # Map from human-readable language names (matching the codebase's
 # TARGET_LANGUAGE convention) to NLLB-200 language tags. NLLB needs these to
@@ -225,7 +236,11 @@ def _translate_sync(
     out: list[str] = []
     bsz = max(1, settings.LOCAL_BATCH_SIZE)
     max_len = max(1, settings.LOCAL_MAX_LENGTH)
-    with torch.inference_mode():
+    # See ``_inference_lock`` docstring at module top for why this is needed.
+    # The whole tokenise+generate+decode path holds the lock; releasing
+    # between sub-batches would let another thread interleave its own
+    # tokenizer call, which is exactly what triggers the Rust panic.
+    with _inference_lock, torch.inference_mode():
         for i in range(0, len(texts), bsz):
             batch = [
                 _format_with_gender_hint(t, gender, target_language, source_language)

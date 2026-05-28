@@ -112,6 +112,65 @@ async def test_translate_batch_async_empty_input():
 
 
 @pytest.mark.asyncio
+async def test_translate_batch_async_serialises_concurrent_calls(monkeypatch):
+    # Regression: two chunks calling _translate_sync from different worker
+    # threads must not enter the tokenizer concurrently. Real HF FastTokenizer
+    # raises ``RuntimeError: Already borrowed`` from the Rust layer if they do
+    # — we simulate the panic with a fake tokenizer that explodes when entered
+    # while another thread is still inside it. With the lock in place, both
+    # calls complete; without it, this test would raise.
+    import asyncio
+    import threading
+
+    entered = 0
+    max_concurrent = 0
+    lock_witness = threading.Lock()
+
+    class _RaceTokenizer:
+        def __call__(self, texts, **kwargs):
+            nonlocal entered, max_concurrent
+            with lock_witness:
+                entered += 1
+                max_concurrent = max(max_concurrent, entered)
+                if entered > 1:
+                    # Mimic the HF Rust panic so any future regression that
+                    # drops the lock surfaces here with the same shape.
+                    raise RuntimeError("Already borrowed")
+            try:
+                # Hold the tokenizer "open" long enough that the sibling thread
+                # would race in without the inference lock.
+                import time
+                time.sleep(0.05)
+                return _FakeInputs(input_ids=list(range(len(texts))))
+            finally:
+                with lock_witness:
+                    entered -= 1
+
+        def batch_decode(self, ids, **kwargs):
+            return [f"HE:{i}" for i in range(len(ids))]
+
+    fake_tok = _RaceTokenizer()
+    fake_model = _FakeModel()
+    fake_model.generate = lambda **kw: [None]
+
+    monkeypatch.setattr(
+        translate_local, "get_model_and_tokenizer",
+        lambda: (fake_model, fake_tok),
+    )
+
+    results = await asyncio.gather(
+        translate_local.translate_batch_async(["a"], None, "Hebrew"),
+        translate_local.translate_batch_async(["b"], None, "Hebrew"),
+        translate_local.translate_batch_async(["c"], None, "Hebrew"),
+    )
+    assert all(r == ["HE:0"] for r in results)
+    assert max_concurrent == 1, (
+        f"_inference_lock failed to serialise tokenizer calls "
+        f"(saw {max_concurrent} concurrent entries)"
+    )
+
+
+@pytest.mark.asyncio
 async def test_translate_batch_async_accepts_and_ignores_client_and_addressee(monkeypatch):
     # Signature parity with the Claude backend: extra kwargs are accepted.
     fake_tok = _FakeTokenizer()
