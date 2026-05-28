@@ -132,3 +132,30 @@ async def test_translate_batch_async_no_addressee_when_unset():
     # Generic "matching the addressee" guidance is always-on when gender is set,
     # but the specific "most likely addressee" hint must be absent.
     assert "most likely addressee" not in client.messages.systems[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_translate_batch_async_source_language_reaches_prompt():
+    # Default: prompt says "from English".
+    client = _RecordingAsyncClient([json.dumps({"translations": ["a-he"]})])
+    await translate.translate_batch_async(["hello"], None, "Hebrew", client)
+    assert "from English into Hebrew" in client.messages.systems[0]
+
+    # Overridden: prompt reflects the caller's source_language.
+    client = _RecordingAsyncClient([json.dumps({"translations": ["a-he"]})])
+    await translate.translate_batch_async(
+        ["hello"], None, "Hebrew", client, source_language="French",
+    )
+    assert "from French into Hebrew" in client.messages.systems[0]
+    assert "from English into Hebrew" not in client.messages.systems[0]
+
+
+def test_system_prompt_source_language_default_and_override():
+    # Direct unit-level check on _system_prompt: default + override behaviour.
+    default = translate._system_prompt("Hebrew", None)
+    assert "from English into Hebrew" in default
+    overridden = translate._system_prompt(
+        "Hebrew", None, source_language="Spanish",
+    )
+    assert "from Spanish into Hebrew" in overridden
+    assert "from English" not in overridden

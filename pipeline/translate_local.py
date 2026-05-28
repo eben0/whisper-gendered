@@ -165,7 +165,10 @@ def model_loaded() -> bool:
 
 
 def _format_with_gender_hint(
-    text: str, gender: str | None, target_language: str
+    text: str,
+    gender: str | None,
+    target_language: str,
+    source_language: str = "English",
 ) -> str:
     """Prepend a best-effort gender hint to the source text.
 
@@ -176,13 +179,17 @@ def _format_with_gender_hint(
     """
     if not settings.LOCAL_USE_GENDER_PREFIX or not gender:
         return text
-    return f"Translate to {target_language} ({gender} speaker): {text}"
+    return (
+        f"Translate from {source_language} to {target_language} "
+        f"({gender} speaker): {text}"
+    )
 
 
 def _translate_sync(
     texts: list[str],
     gender: str | None,
     target_language: str,
+    source_language: str = "English",
 ) -> list[str]:
     """The CPU/GPU-bound work; the async wrapper offloads this to a thread."""
     if not texts:
@@ -194,7 +201,16 @@ def _translate_sync(
     # BOS token at generate-time. MarianMT ignores both.
     forced_bos: int | None = None
     if _is_nllb_tokenizer(tokenizer):
-        tokenizer.src_lang = NLLB_LANGUAGE_CODES.get("English", "eng_Latn")
+        src_code = NLLB_LANGUAGE_CODES.get(source_language)
+        if src_code is None:
+            log.warning(
+                "No NLLB language code mapped for source=%r; falling back to "
+                "eng_Latn. Add the mapping to NLLB_LANGUAGE_CODES in "
+                "pipeline/translate_local.py.",
+                source_language,
+            )
+            src_code = "eng_Latn"
+        tokenizer.src_lang = src_code
         target_code = NLLB_LANGUAGE_CODES.get(target_language)
         if target_code is None:
             log.warning(
@@ -212,7 +228,7 @@ def _translate_sync(
     with torch.inference_mode():
         for i in range(0, len(texts), bsz):
             batch = [
-                _format_with_gender_hint(t, gender, target_language)
+                _format_with_gender_hint(t, gender, target_language, source_language)
                 for t in texts[i : i + bsz]
             ]
             inputs = tokenizer(
@@ -240,11 +256,15 @@ async def translate_batch_async(
     target_language: str,
     client: Any = None,  # ignored — kept for signature parity with the Claude backend
     addressee_gender: str | None = None,  # ignored by this backend (see module docstring)
+    source_language: str = "English",
 ) -> list[str]:
     """Translate ``texts`` into ``target_language``, returning one string each.
 
     Signature-compatible with ``pipeline.translate.translate_batch_async`` so the
     orchestrator's call site doesn't change when ``TRANSLATION_BACKEND=local``.
+    ``source_language`` defaults to English; the orchestrator passes the value
+    derived from the request's ``language`` query param (mapped from ISO to
+    display name via ``pipeline.lang.language_name``).
     Output length always equals input length; an empty input returns ``[]``.
 
     ``client`` and ``addressee_gender`` are accepted but unused: the local model
@@ -253,7 +273,7 @@ async def translate_batch_async(
     if not texts:
         return []
     return await asyncio.to_thread(
-        _translate_sync, texts, gender, target_language,
+        _translate_sync, texts, gender, target_language, source_language,
     )
 
 

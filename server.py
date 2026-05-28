@@ -88,6 +88,7 @@ else:
     from pipeline import translate  # type: ignore[no-redef]
 from pipeline.chunk import make_chunks
 from pipeline.format import render
+from pipeline.lang import language_name
 from pipeline.transcribe import Segment
 
 logging.basicConfig(
@@ -264,6 +265,7 @@ async def _translate_chunk(
     client,
     sem: asyncio.Semaphore,
     prev_speaker_gender: str | None,
+    source_language: str = "English",
 ) -> None:
     """Translate one chunk's pre-built speaker groups in place.
 
@@ -271,7 +273,8 @@ async def _translate_chunk(
     (built by the orchestrator so it can also derive the chunk's last-group
     gender for cross-chunk carry). ``prev_speaker_gender`` seeds the addressee
     rotation: the first group's addressee is "whoever spoke before this chunk"
-    (or ``None`` for the very first chunk).
+    (or ``None`` for the very first chunk). ``source_language`` is the
+    request's audio language (display name) used in the translation prompt.
     """
     async with sem:
         prev_group_gender = prev_speaker_gender
@@ -289,6 +292,7 @@ async def _translate_chunk(
                 translated = await translate.translate_batch_async(
                     [s.text for s in group], spk_gender, target, client,
                     addressee_gender=addressee,
+                    source_language=source_language,
                 )
                 for seg, text in zip(group, translated):
                     seg.text = text
@@ -303,6 +307,7 @@ async def _run_gender_aware(
     segments: list[Segment],
     target: str,
     client,
+    source_language: str = "English",
 ) -> list[Segment]:
     audio, sr = await run_in_thread(_load_wav_mono, audio_path)
     chunks = make_chunks(segments, settings.CHUNK_DURATION_SEC)
@@ -328,7 +333,10 @@ async def _run_gender_aware(
                 assigned.append((seg, diarize.assign_speaker(local, annotation)))
             groups = _group_consecutive(assigned)
             tasks.append(asyncio.create_task(
-                _translate_chunk(idx, groups, genders, target, client, sem, prev_speaker_gender)
+                _translate_chunk(
+                    idx, groups, genders, target, client, sem,
+                    prev_speaker_gender, source_language,
+                )
             ))
             # Carry: the next chunk's first group's addressee is this chunk's
             # final group's speaker gender.
@@ -352,6 +360,7 @@ async def _run_plain_translate(
     segments: list[Segment],
     target: str,
     client,
+    source_language: str = "English",
 ) -> list[Segment]:
     chunks = make_chunks(segments, settings.CHUNK_DURATION_SEC)
     sem = asyncio.Semaphore(settings.TRANSLATE_CONCURRENCY)
@@ -359,7 +368,8 @@ async def _run_plain_translate(
     async def translate_one(chunk):
         async with sem:
             translated = await translate.translate_batch_async(
-                [s.text for s in chunk.segments], None, target, client
+                [s.text for s in chunk.segments], None, target, client,
+                source_language=source_language,
             )
             for seg, text in zip(chunk.segments, translated):
                 seg.text = text
@@ -386,6 +396,10 @@ async def run_pipeline_async(audio_path: Path, language: str) -> list[Segment]:
         return segments
 
     target = settings.TARGET_LANGUAGE
+    # The audio's source language: Bazarr sends an ISO 639-1 code in `language`;
+    # convert to a display name for the translation prompts. Falls back to
+    # "English" on empty/unknown inputs (the safe pre-feature default).
+    source_language = language_name(language)
     # Only the Claude backend needs an Anthropic client; the local backend
     # ignores the parameter. Skipping the call also avoids requiring
     # ANTHROPIC_API_KEY when running fully on-device.
@@ -394,8 +408,8 @@ async def run_pipeline_async(audio_path: Path, language: str) -> list[Segment]:
     else:
         client = get_async_anthropic_client()
     if settings.is_gender_aware():
-        return await _run_gender_aware(audio_path, segments, target, client)
-    return await _run_plain_translate(segments, target, client)
+        return await _run_gender_aware(audio_path, segments, target, client, source_language)
+    return await _run_plain_translate(segments, target, client, source_language)
 
 
 # --------------------------------------------------------------------------- #
