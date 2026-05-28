@@ -169,6 +169,21 @@ def _write_silent_wav(path: Path, seconds: float = 1.0, sr: int = 16000) -> None
     sf.write(str(path), np.zeros(int(seconds * sr), dtype=np.float32), sr)
 
 
+def _empty_cuda_cache() -> None:
+    """Best-effort release of cached-but-unused CUDA memory.
+
+    Cheap when no CUDA is present (or torch isn't loaded yet), never raises.
+    Called at the start of each /asr request to defragment the allocator
+    between requests — see the call site comment for the OOM rationale.
+    """
+    try:
+        import torch  # local import: keeps module-load time unchanged for tests
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # pragma: no cover - the call is purely best-effort
+        log.debug("cuda.empty_cache failed (continuing)", exc_info=True)
+
+
 def _compute_side_file_path(
     video_file_url: str,
     src_prefix: str,
@@ -617,6 +632,14 @@ async def asr(
             await run_in_thread(prepare_unencoded, raw_path, audio_path)
 
         async with _semaphore:
+            # Reclaim cached-but-unused VRAM left by a previous request before
+            # touching the GPU. The PyTorch caching allocator does not return
+            # memory between requests on its own, and Whisper large-v3 + pyannote
+            # + NLLB resident together leave only ~3 GB of slack on an 8 GB card.
+            # Without this, a back-to-back /asr has been observed to OOM in the
+            # transcribe step (CUDA error: out of memory) even though both
+            # requests fit individually when the process is fresh.
+            _empty_cuda_cache()
             segments = await run_pipeline_async(audio_path, language)
 
         body, content_type = render(segments, output)
