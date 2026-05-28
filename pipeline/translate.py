@@ -62,10 +62,14 @@ def _system_prompt(
             f"participle agreement, imperatives, and pronouns must all match a "
             f"{gender} speaker referring to themselves."
         )
+        base += (
+            f" When the speaker addresses another person (English \"you\"), "
+            f"choose the {target_language} form matching the addressee's number "
+            f"and gender."
+        )
         if addressee_gender is not None:
             base += (
-                f" When the speaker addresses another person (English \"you\"), "
-                f"the most likely addressee in this exchange is "
+                f" The most likely addressee in this exchange is "
                 f"{addressee_gender}; prefer that form for singular \"you\" "
                 f"unless context clearly implies a different addressee."
             )

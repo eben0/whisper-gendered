@@ -70,8 +70,12 @@ def test_system_prompt_includes_addressee_sentence_when_set():
 
 
 def test_system_prompt_omits_addressee_sentence_when_unset():
+    # When no specific addressee_gender hint is provided, the generic "matching
+    # the addressee's number and gender" guidance still appears, but the specific
+    # "most likely addressee" sentence does not.
     prompt = translate._system_prompt("Hebrew", "female")
-    assert "addressee" not in prompt.lower()
+    assert "matching the addressee" in prompt.lower()
+    assert "most likely addressee" not in prompt.lower()
 
 
 def test_system_prompt_addresses_number_when_target_is_gender_aware():
@@ -79,3 +83,13 @@ def test_system_prompt_addresses_number_when_target_is_gender_aware():
     prompt = translate._system_prompt("Hebrew", "male", addressee_gender=None)
     # The "you" / number guidance should be present regardless of addressee_gender.
     assert "plural" in prompt.lower()
+
+
+def test_system_prompt_includes_you_form_guidance_even_without_addressee_hint():
+    # The generic guidance to choose the right "you" form must appear whenever
+    # the speaker's gender is set, regardless of addressee_gender. The spec
+    # requires this so Claude considers second-person form selection in
+    # ambiguous group scenes too, not only when a specific hint is provided.
+    prompt = translate._system_prompt("Hebrew", "male", addressee_gender=None)
+    assert "addresses another person" in prompt
+    assert "matching the addressee" in prompt
