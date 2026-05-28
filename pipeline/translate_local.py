@@ -97,8 +97,21 @@ def _resolve_dtype() -> torch.dtype:
 
 
 def _is_nllb_tokenizer(tokenizer: Any) -> bool:
-    """NLLB tokenizers expose ``lang_code_to_id``; MarianMT tokenizers do not."""
-    return hasattr(tokenizer, "lang_code_to_id")
+    """Detect NLLB tokenizers across transformers versions.
+
+    transformers ≤4.x exposed ``lang_code_to_id`` as an attribute; transformers
+    5.x removed it and manages language tags through the added-tokens
+    vocabulary instead. Keying on ``hasattr(..., "lang_code_to_id")`` therefore
+    silently returns False on 5.x — the NLLB branch is skipped, ``src_lang``
+    and ``forced_bos_token_id`` are never set, and the model free-generates in
+    whatever language it picks per batch (we observed Spanish, Romanian, and
+    Tswana output for an English→Hebrew job).
+
+    The class name ``NllbTokenizer`` / ``NllbTokenizerFast`` is stable across
+    both major versions, so we key on that instead. MarianMT tokenizers are
+    named ``MarianTokenizer`` and correctly fall through to the non-NLLB path.
+    """
+    return type(tokenizer).__name__.startswith("Nllb")
 
 
 def _check_vram_fits(model: Any, device: str) -> None:

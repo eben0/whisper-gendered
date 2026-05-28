@@ -192,6 +192,35 @@ async def test_translate_batch_async_accepts_and_ignores_client_and_addressee(mo
     assert out == ["HE:0"]
 
 
+def test_is_nllb_tokenizer_keys_on_class_name():
+    # Regression: this used to check ``hasattr(tokenizer, "lang_code_to_id")``,
+    # which silently returned False on transformers 5.x (the attribute was
+    # removed). The NLLB branch was then skipped — no src_lang, no forced
+    # target token — and the model generated random multilingual output. We
+    # now key on the class name, which is stable across versions.
+    class NllbTokenizer: pass
+    class NllbTokenizerFast: pass
+    class MarianTokenizer: pass
+    class MarianTokenizerFast: pass
+
+    assert translate_local._is_nllb_tokenizer(NllbTokenizer()) is True
+    assert translate_local._is_nllb_tokenizer(NllbTokenizerFast()) is True
+    assert translate_local._is_nllb_tokenizer(MarianTokenizer()) is False
+    assert translate_local._is_nllb_tokenizer(MarianTokenizerFast()) is False
+
+    # A historical NLLB tokenizer that still has lang_code_to_id but a
+    # different (hypothetical) class name should still be detected by name.
+    class NllbV2Tokenizer:
+        lang_code_to_id = {"eng_Latn": 256047}
+    assert translate_local._is_nllb_tokenizer(NllbV2Tokenizer()) is True
+
+    # An unrelated tokenizer that happens to expose ``lang_code_to_id`` must
+    # NOT be classified as NLLB — that was the old bug in reverse.
+    class WeirdTokenizer:
+        lang_code_to_id = {"foo": 1}
+    assert translate_local._is_nllb_tokenizer(WeirdTokenizer()) is False
+
+
 # ---------------------------------------------------------------------------- #
 # 2. Smoke — real model, real translation; skips on no-GPU or offline runners
 # ---------------------------------------------------------------------------- #
