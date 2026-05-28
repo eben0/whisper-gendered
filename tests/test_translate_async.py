@@ -93,3 +93,42 @@ def test_system_prompt_includes_you_form_guidance_even_without_addressee_hint():
     prompt = translate._system_prompt("Hebrew", "male", addressee_gender=None)
     assert "addresses another person" in prompt
     assert "matching the addressee" in prompt
+
+
+class _RecordingMessages:
+    """Captures the system prompt of every create() call."""
+
+    def __init__(self, payloads):
+        self._payloads = payloads
+        self.calls = 0
+        self.systems: list[str] = []
+
+    async def create(self, **kwargs):
+        self.systems.append(kwargs.get("system", ""))
+        text = self._payloads[self.calls]
+        self.calls += 1
+        return _FakeResponse(text)
+
+
+class _RecordingAsyncClient:
+    def __init__(self, payloads):
+        self.messages = _RecordingMessages(payloads)
+
+
+@pytest.mark.asyncio
+async def test_translate_batch_async_forwards_addressee_into_prompt():
+    client = _RecordingAsyncClient([json.dumps({"translations": ["a-he"]})])
+    await translate.translate_batch_async(
+        ["hello"], "female", "Hebrew", client, addressee_gender="male",
+    )
+    assert "male" in client.messages.systems[0]
+    assert "addressee" in client.messages.systems[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_translate_batch_async_no_addressee_when_unset():
+    client = _RecordingAsyncClient([json.dumps({"translations": ["a-he"]})])
+    await translate.translate_batch_async(["hello"], "female", "Hebrew", client)
+    # Generic "matching the addressee" guidance is always-on when gender is set,
+    # but the specific "most likely addressee" hint must be absent.
+    assert "most likely addressee" not in client.messages.systems[0].lower()
