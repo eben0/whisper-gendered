@@ -33,7 +33,7 @@ def _install_fakes(monkeypatch, segments, gender_aware):
     monkeypatch.setattr(server.diarize, "assign_speaker", lambda seg, ann: "SPEAKER_00")
     monkeypatch.setattr(server.gender, "detect_genders", lambda audio, sr, ann: {"SPEAKER_00": "female"})
 
-    async def fake_translate(texts, gender, target, client, addressee_gender=None):
+    async def fake_translate(texts, gender, target, client, addressee_gender=None, source_language="English"):
         return [f"{t}|{gender}" for t in texts]
 
     monkeypatch.setattr(server.translate, "translate_batch_async", fake_translate)
@@ -85,7 +85,7 @@ async def test_chunk_local_offset_maps_speakers(monkeypatch, two_chunk_segments)
     monkeypatch.setattr(server.diarize, "diarize_waveform", fake_diarize)
     monkeypatch.setattr(server.gender, "detect_genders", lambda audio, sr, ann: {"S": "female"})
 
-    async def fake_translate(texts, gender, target, client, addressee_gender=None):
+    async def fake_translate(texts, gender, target, client, addressee_gender=None, source_language="English"):
         return [f"{t}|{gender}" for t in texts]
 
     monkeypatch.setattr(server.translate, "translate_batch_async", fake_translate)
@@ -126,7 +126,7 @@ async def test_addressee_rotates_within_chunk(monkeypatch):
 
     addressees: list[str | None] = []
 
-    async def fake_translate(texts, gender, target, client, addressee_gender=None):
+    async def fake_translate(texts, gender, target, client, addressee_gender=None, source_language="English"):
         addressees.append(addressee_gender)
         return [f"{t}|{gender}|{addressee_gender}" for t in texts]
 
@@ -168,7 +168,7 @@ async def test_addressee_carries_across_chunks(monkeypatch):
         return result
     monkeypatch.setattr(server.gender, "detect_genders", fake_detect)
 
-    async def fake_translate(texts, gender, target, client, addressee_gender=None):
+    async def fake_translate(texts, gender, target, client, addressee_gender=None, source_language="English"):
         return [f"{t}|{gender}|{addressee_gender}" for t in texts]
     monkeypatch.setattr(server.translate, "translate_batch_async", fake_translate)
 
@@ -211,7 +211,7 @@ async def test_addressee_hint_disabled_by_flag(monkeypatch):
 
     addressees: list[str | None] = []
 
-    async def fake_translate(texts, gender, target, client, addressee_gender=None):
+    async def fake_translate(texts, gender, target, client, addressee_gender=None, source_language="English"):
         addressees.append(addressee_gender)
         return [f"{t}|{gender}|{addressee_gender}" for t in texts]
 
@@ -221,3 +221,33 @@ async def test_addressee_hint_disabled_by_flag(monkeypatch):
     # Flag off -> every call sees addressee_gender=None regardless of rotation.
     assert addressees == [None, None, None]
     assert [s.text for s in out] == ["a|male|None", "b|female|None", "c|male|None"]
+
+
+@pytest.mark.asyncio
+async def test_source_language_from_request_reaches_translator(monkeypatch):
+    # Bazarr-style ISO code "fr" should map to "French" and arrive at the
+    # translator's source_language kwarg.
+    segs = [Segment(start=0.0, end=1.0, text="x")]
+    monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Hebrew")
+    monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 30)
+    monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
+    monkeypatch.setattr(server.transcribe, "transcribe", lambda path, language="en": list(segs))
+    monkeypatch.setattr(server, "_load_wav_mono", lambda path: (np.zeros(16000 * 2, dtype=np.float32), 16000))
+    monkeypatch.setattr(server, "get_async_anthropic_client", lambda: object())
+
+    ann = Annotation()
+    ann[PSegment(0.0, 1.0)] = "S"
+    monkeypatch.setattr(server.diarize, "diarize_waveform", lambda *a, **k: ann)
+    monkeypatch.setattr(server.gender, "detect_genders", lambda audio, sr, a: {"S": "male"})
+
+    received: list[str] = []
+
+    async def fake_translate(texts, gender, target, client, addressee_gender=None, source_language="English"):
+        received.append(source_language)
+        return [f"{t}|{source_language}" for t in texts]
+
+    monkeypatch.setattr(server.translate, "translate_batch_async", fake_translate)
+
+    out = await server.run_pipeline_async(server.Path("ignored.wav"), "fr")
+    assert received == ["French"]
+    assert [s.text for s in out] == ["x|French"]

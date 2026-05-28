@@ -7,7 +7,9 @@ manual E2E. Path assertions use Windows separators (this is a Windows-only
 project; the server runs on the host that owns the share mount).
 """
 
-from server import _compute_side_file_path
+from pathlib import Path
+
+from server import _compute_side_file_path, _compute_summary_path
 
 
 def test_translates_linux_prefix_to_windows_prefix():
@@ -64,3 +66,51 @@ def test_returns_none_when_video_file_url_is_empty():
     assert _compute_side_file_path(
         "", src_prefix="/media", dst_prefix="Z:\\media", suffix=".he.srt",
     ) is None
+
+
+# -- _compute_summary_path ------------------------------------------------- #
+
+def test_summary_path_pairs_with_he_srt():
+    # The common case: SRT was written as foo.he.srt, summary lives at
+    # foo.he.summary.txt — same directory, paired by filename.
+    srt = Path(r"Z:\media\tv\Show\episode.he.srt")
+    assert _compute_summary_path(srt) == Path(
+        r"Z:\media\tv\Show\episode.he.summary.txt"
+    )
+
+
+def test_summary_path_preserves_language_suffix():
+    # Multi-language scenario: episode has .ar.srt, .fr.srt, etc.; the
+    # summary must NOT clobber the language tag (the obvious .with_suffix
+    # trap that did the wrong thing in the first draft of this code).
+    for lang_suffix in (".he", ".ar", ".fr", ".es", ".ja"):
+        srt = Path(rf"Z:\media\tv\Show\episode{lang_suffix}.srt")
+        expected = Path(rf"Z:\media\tv\Show\episode{lang_suffix}.summary.txt")
+        assert _compute_summary_path(srt) == expected
+
+
+def test_summary_path_handles_uppercase_extension():
+    # Some clients send .SRT on Windows shares; we treat that as still an SRT.
+    srt = Path(r"Z:\media\tv\Show\episode.he.SRT")
+    assert _compute_summary_path(srt) == Path(
+        r"Z:\media\tv\Show\episode.he.summary.txt"
+    )
+
+
+def test_summary_path_with_no_srt_extension_appends():
+    # Unusual but defended: configured suffix without .srt (e.g. just .he
+    # if someone overrides SAVE_SRT_SUFFIX). Append .summary.txt rather than
+    # clobber an unknown extension.
+    srt = Path(r"Z:\media\tv\Show\episode.he")
+    assert _compute_summary_path(srt) == Path(
+        r"Z:\media\tv\Show\episode.he.summary.txt"
+    )
+
+
+def test_summary_path_with_dots_in_filename():
+    # Multi-dot stems (very common in release names: "Show.S01E01.WEBRip-1080p")
+    # must not lose any of those dots — only the trailing ``.srt`` goes.
+    srt = Path(r"Z:\media\Show.S01E01.WEBRip-1080p.he.srt")
+    assert _compute_summary_path(srt) == Path(
+        r"Z:\media\Show.S01E01.WEBRip-1080p.he.summary.txt"
+    )

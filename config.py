@@ -77,6 +77,23 @@ class Settings:
     SAVE_SRT_VIDEO_PREFIX: str = os.getenv("SAVE_SRT_VIDEO_PREFIX", "")
     SAVE_SRT_LOCAL_PREFIX: str = os.getenv("SAVE_SRT_LOCAL_PREFIX", "")
     SAVE_SRT_SUFFIX: str = os.getenv("SAVE_SRT_SUFFIX", ".he.srt")
+    # Translation backend selection. "claude" (default) is the existing
+    # Anthropic API path; "local" uses pipeline/translate_local.py with a
+    # HuggingFace seq2seq model. All LOCAL_* keys below are only consulted when
+    # TRANSLATION_BACKEND=local.
+    TRANSLATION_BACKEND: str = os.getenv("TRANSLATION_BACKEND", "claude")
+    LOCAL_TRANSLATION_MODEL: str = os.getenv(
+        "LOCAL_TRANSLATION_MODEL", "facebook/nllb-200-distilled-600M"
+    )
+    LOCAL_TRANSLATION_DEVICE: str = os.getenv("LOCAL_TRANSLATION_DEVICE", "cuda")
+    LOCAL_TRANSLATION_DTYPE: str = os.getenv("LOCAL_TRANSLATION_DTYPE", "float16")
+    LOCAL_BATCH_SIZE: int = _env_int("LOCAL_BATCH_SIZE", 16)
+    LOCAL_MAX_LENGTH: int = _env_int("LOCAL_MAX_LENGTH", 512)
+    # Off by default: local seq2seq models aren't instruction-followers, so
+    # the gender hint gets translated as part of the source string rather
+    # than steering the output. Opt in only if you've verified it helps for
+    # your specific model.
+    LOCAL_USE_GENDER_PREFIX: bool = _env_bool("LOCAL_USE_GENDER_PREFIX", False)
     DEBUG: bool = _env_bool("DEBUG", False)
 
     def translation_enabled(self) -> bool:

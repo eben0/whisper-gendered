@@ -9,5 +9,10 @@ anthropic
 python-dotenv
 python-multipart
 numpy
+# Local translation backend (optional — only used when TRANSLATION_BACKEND=local).
+transformers>=4.40.0
+sentencepiece>=0.2.0
+sacremoses>=0.1.1
+accelerate>=0.29.0
 pytest
 pytest-asyncio

@@ -48,10 +48,11 @@ def _system_prompt(
     target_language: str,
     gender: str | None,
     addressee_gender: str | None = None,
+    source_language: str = "English",
 ) -> str:
     base = (
         f"You are an expert subtitle translator. Translate each numbered line "
-        f"from English into {target_language}. Produce natural, idiomatic, "
+        f"from {source_language} into {target_language}. Produce natural, idiomatic, "
         f"concise {target_language} suitable for on-screen subtitles. Preserve "
         f"meaning and tone; do not add notes, explanations, or transliteration."
     )
@@ -63,9 +64,9 @@ def _system_prompt(
             f"{gender} speaker referring to themselves."
         )
         base += (
-            f" When the speaker addresses another person (English \"you\"), "
-            f"choose the {target_language} form matching the addressee's number "
-            f"and gender."
+            f" When the speaker addresses another person ({source_language} \"you\""
+            f" or its equivalent), choose the {target_language} form matching the "
+            f"addressee's number and gender."
         )
         if addressee_gender is not None:
             base += (
@@ -112,12 +113,13 @@ def _translate_one_batch(
     target_language: str,
     client: anthropic.Anthropic,
     addressee_gender: str | None = None,
+    source_language: str = "English",
 ) -> list[str]:
     numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
     response = client.messages.create(
         model=settings.CLAUDE_MODEL,
         max_tokens=MAX_TOKENS,
-        system=_system_prompt(target_language, gender, addressee_gender),
+        system=_system_prompt(target_language, gender, addressee_gender, source_language),
         output_config={"format": _OUTPUT_FORMAT},
         messages=[{"role": "user", "content": numbered}],
     )
@@ -143,12 +145,16 @@ def translate_batch(
     target_language: str,
     client: anthropic.Anthropic,
     addressee_gender: str | None = None,
+    source_language: str = "English",
 ) -> list[str]:
     """Translate ``texts`` into ``target_language``, returning one string each.
 
     ``gender`` is ``"male"``/``"female"`` for gender-aware languages, or ``None``
     to request a plain translation. ``addressee_gender`` (optional) hints the
     grammatical "you" form for languages where second-person is gender-marked.
+    ``source_language`` defaults to English so existing callers stay valid;
+    the orchestrator passes the value derived from the request's ``language``
+    query param.
     Output length always equals input length.
     """
     if not texts:
@@ -156,7 +162,9 @@ def translate_batch(
     out: list[str] = []
     for batch in _chunks(texts):
         out.extend(
-            _translate_one_batch(batch, gender, target_language, client, addressee_gender)
+            _translate_one_batch(
+                batch, gender, target_language, client, addressee_gender, source_language,
+            )
         )
     return out
 
@@ -167,12 +175,13 @@ async def _translate_one_batch_async(
     target_language: str,
     client: anthropic.AsyncAnthropic,
     addressee_gender: str | None = None,
+    source_language: str = "English",
 ) -> list[str]:
     numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
     response = await client.messages.create(
         model=settings.CLAUDE_MODEL,
         max_tokens=MAX_TOKENS,
-        system=_system_prompt(target_language, gender, addressee_gender),
+        system=_system_prompt(target_language, gender, addressee_gender, source_language),
         output_config={"format": _OUTPUT_FORMAT},
         messages=[{"role": "user", "content": numbered}],
     )
@@ -198,12 +207,15 @@ async def translate_batch_async(
     target_language: str,
     client: anthropic.AsyncAnthropic,
     addressee_gender: str | None = None,
+    source_language: str = "English",
 ) -> list[str]:
     """Async counterpart of ``translate_batch`` for the chunked orchestrator.
 
     Sub-batches run sequentially within one call; cross-chunk concurrency is
     handled by the caller's semaphore. ``addressee_gender`` (optional) hints the
-    grammatical "you" form. Output length always equals input length.
+    grammatical "you" form. ``source_language`` defaults to English; the
+    orchestrator passes the value derived from the request's ``language``
+    query param. Output length always equals input length.
     """
     if not texts:
         return []
@@ -211,7 +223,7 @@ async def translate_batch_async(
     for batch in _chunks(texts):
         out.extend(
             await _translate_one_batch_async(
-                batch, gender, target_language, client, addressee_gender
+                batch, gender, target_language, client, addressee_gender, source_language,
             )
         )
     return out
