@@ -150,6 +150,7 @@ All settings come from environment variables (or a `.env` file). See `.env.examp
 | `CHUNK_DURATION_SEC` | `300`                | Target seconds of audio per pipeline chunk                            |
 | `TRANSLATE_CONCURRENCY`| `3`                | Max chunk translations running concurrently (Claude)                  |
 | `CLAUDE_MAX_RETRIES` | `4`                  | Anthropic SDK auto-retry attempts on 429/529/connection errors        |
+| `ADDRESSEE_GENDER_HINT_ENABLED` | `true`    | Pass the prior group's speaker gender as an addressee hint to Claude  |
 | `DEBUG`              | `false`              | Verbose logging                                                        |
 
 **Gender-aware languages** (full diarization + gender pipeline): Hebrew, Arabic, French, Spanish,

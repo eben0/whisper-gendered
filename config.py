@@ -64,6 +64,11 @@ class Settings:
     CHUNK_DURATION_SEC: int = _env_int("CHUNK_DURATION_SEC", 300)
     TRANSLATE_CONCURRENCY: int = _env_int("TRANSLATE_CONCURRENCY", 3)
     CLAUDE_MAX_RETRIES: int = _env_int("CLAUDE_MAX_RETRIES", 4)
+    # When true (default), the orchestrator passes the previous group's speaker
+    # gender as an addressee hint to the translation prompt. Set to false to
+    # disable that specific hint while keeping the broader "you"-form guidance
+    # in the system prompt — useful for A/B testing the addressee feature.
+    ADDRESSEE_GENDER_HINT_ENABLED: bool = _env_bool("ADDRESSEE_GENDER_HINT_ENABLED", True)
     DEBUG: bool = _env_bool("DEBUG", False)
 
     def translation_enabled(self) -> bool:

@@ -179,3 +179,45 @@ async def test_addressee_carries_across_chunks(monkeypatch):
     text_by_seg = {s.text.split("|")[0]: s.text for s in out}
     assert text_by_seg["a"] == "a|female|None"
     assert text_by_seg["b"] == "b|male|female"
+
+
+@pytest.mark.asyncio
+async def test_addressee_hint_disabled_by_flag(monkeypatch):
+    # Same setup as test_addressee_rotates_within_chunk, but with the feature
+    # flag OFF: addressee_gender should be None for every translate call, even
+    # though prev_group_gender would otherwise carry forward.
+    segs = [
+        Segment(start=0.0, end=1.0, text="a"),
+        Segment(start=1.0, end=2.0, text="b"),
+        Segment(start=2.0, end=3.0, text="c"),
+    ]
+    monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Hebrew")
+    monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 30)
+    monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
+    monkeypatch.setattr(server.settings, "ADDRESSEE_GENDER_HINT_ENABLED", False)
+    monkeypatch.setattr(server.transcribe, "transcribe", lambda path, language="en": list(segs))
+    monkeypatch.setattr(server, "_load_wav_mono", lambda path: (np.zeros(16000 * 5, dtype=np.float32), 16000))
+    monkeypatch.setattr(server, "get_async_anthropic_client", lambda: object())
+
+    ann = Annotation()
+    ann[PSegment(0.0, 1.0)] = "S_M1"
+    ann[PSegment(1.0, 2.0)] = "S_F"
+    ann[PSegment(2.0, 3.0)] = "S_M2"
+    monkeypatch.setattr(server.diarize, "diarize_waveform", lambda *a, **k: ann)
+    monkeypatch.setattr(
+        server.gender, "detect_genders",
+        lambda audio, sr, a: {"S_M1": "male", "S_F": "female", "S_M2": "male"},
+    )
+
+    addressees: list[str | None] = []
+
+    async def fake_translate(texts, gender, target, client, addressee_gender=None):
+        addressees.append(addressee_gender)
+        return [f"{t}|{gender}|{addressee_gender}" for t in texts]
+
+    monkeypatch.setattr(server.translate, "translate_batch_async", fake_translate)
+
+    out = await server.run_pipeline_async(server.Path("ignored.wav"), "en")
+    # Flag off -> every call sees addressee_gender=None regardless of rotation.
+    assert addressees == [None, None, None]
+    assert [s.text for s in out] == ["a|male|None", "b|female|None", "c|male|None"]

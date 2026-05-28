@@ -218,7 +218,14 @@ async def _translate_chunk(
         try:
             for speaker, group in groups:
                 spk_gender = genders.get(speaker, "male") if speaker else "male"
-                addressee = prev_group_gender
+                # Pass the addressee hint only if the feature flag is on; when
+                # off the broader "you"-form guidance in the system prompt still
+                # applies, but no specific addressee gender is asserted.
+                addressee = (
+                    prev_group_gender
+                    if settings.ADDRESSEE_GENDER_HINT_ENABLED
+                    else None
+                )
                 translated = await translate.translate_batch_async(
                     [s.text for s in group], spk_gender, target, client,
                     addressee_gender=addressee,
