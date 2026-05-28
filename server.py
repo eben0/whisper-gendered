@@ -88,7 +88,7 @@ else:
     from pipeline import translate  # type: ignore[no-redef]
 from pipeline.chunk import make_chunks
 from pipeline.format import render
-from pipeline.lang import language_name
+from pipeline.lang import language_name, target_script_ratio
 from pipeline.transcribe import Segment
 
 logging.basicConfig(
@@ -194,12 +194,35 @@ def _compute_side_file_path(
     return stem.with_name(stem.name + suffix)
 
 
-def _try_save_side_file(body: str, video_file_url: str) -> None:
-    """Write the SRT body to the translated path next to the source video.
+def _compute_summary_path(srt_path: Path) -> Path:
+    """Derive the summary file path from an SRT path, paired by name.
+
+    ``episode.he.srt`` -> ``episode.he.summary.txt`` (preserving the language
+    suffix so the pair stays visually grouped in a directory listing).
+    Non-``.srt`` inputs just get ``.summary.txt`` appended.
+
+    Pure function so the naming contract is testable without filesystem I/O.
+    """
+    name = srt_path.name
+    if name.lower().endswith(".srt"):
+        return srt_path.with_name(name[: -len(".srt")] + ".summary.txt")
+    return srt_path.with_name(name + ".summary.txt")
+
+
+def _try_save_side_file(
+    body: str,
+    summary: str | None,
+    video_file_url: str,
+) -> None:
+    """Write the SRT body — and optionally a sibling summary file — to the
+    translated path next to the source video.
 
     Failures (missing share, permission denied, malformed URL) log a warning
     and do not affect the HTTP response. Atomic-ish: write to ``<target>.tmp``
-    first, then ``os.replace`` onto the final name.
+    first, then ``os.replace`` onto the final name. The summary file uses the
+    same atomic pattern with a ``.summary.txt`` sibling derived via
+    ``_compute_summary_path`` so e.g. ``Show.S01E01.he.srt`` pairs with
+    ``Show.S01E01.he.summary.txt``.
     """
     try:
         target = _compute_side_file_path(
@@ -210,14 +233,114 @@ def _try_save_side_file(body: str, video_file_url: str) -> None:
         )
         if target is None:
             return
-        tmp = target.with_name(target.name + ".tmp")
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(body, encoding="utf-8")
         import os as _os
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(body, encoding="utf-8")
         _os.replace(str(tmp), str(target))
         log.info("side-file saved: %s", target)
+        if summary:
+            summary_target = _compute_summary_path(target)
+            tmp_sum = summary_target.with_name(summary_target.name + ".tmp")
+            tmp_sum.write_text(summary, encoding="utf-8")
+            _os.replace(str(tmp_sum), str(summary_target))
+            log.info("side-file summary saved: %s", summary_target)
     except Exception:
         log.exception("side-file save failed; continuing without it")
+
+
+def _build_translation_summary(
+    *,
+    request_id: str,
+    video_file_url: str,
+    source_language_iso: str,
+    source_language_name: str,
+    target_language: str,
+    backend: str,
+    backend_model: str | None,
+    segments: list[Segment],
+    wall_seconds: float,
+) -> str:
+    """Produce a multi-line human-readable summary of a completed translation.
+
+    Designed to live next to the produced SRT and to be eyeball-checkable
+    without opening the full subtitle file. The most important line is the
+    target-script ratio — a ratio < ~0.5 on a known non-Latin target almost
+    always indicates a backend mis-translation (we hit exactly this when
+    NLLB's ``forced_bos_token_id`` plumbing broke and the model produced
+    Spanish/Romanian/Tswana instead of Hebrew).
+    """
+    import urllib.parse
+
+    # Joined text for ratio/length stats. ``\n`` joins keep per-line counts
+    # roughly comparable to the SRT body.
+    text = "\n".join(s.text for s in segments)
+    total_chars = len(text)
+    n_segs = len(segments)
+    ratio = target_script_ratio(text, target_language)
+
+    if ratio is None:
+        script_line = (
+            f"Script check:    n/a (target language has no non-Latin script signal)"
+        )
+    else:
+        pct = ratio * 100
+        flag = " ✓" if ratio >= 0.50 else " ⚠ WRONG LANGUAGE?"
+        script_line = (
+            f"Script check:    {pct:5.1f}% of letters are in the {target_language} "
+            f"script{flag}"
+        )
+
+    # Sample lines — first, two from middle quarters, last. Useful for a quick
+    # eyeball without opening the file.
+    samples: list[tuple[str, Segment]] = []
+    if n_segs:
+        idxs = sorted({0, n_segs // 4, (3 * n_segs) // 4, n_segs - 1})
+        labels = ["first", "early", "late", "last"]
+        for label, idx in zip(labels, idxs):
+            samples.append((label, segments[idx]))
+
+    sample_block = ""
+    if samples:
+        rows: list[str] = []
+        for label, seg in samples:
+            ts = _fmt_timestamp(seg.start)
+            # Truncate very long lines to keep the file scannable.
+            shown = seg.text if len(seg.text) <= 120 else seg.text[:117] + "..."
+            rows.append(f"  {label:<6} ({ts}) {shown}")
+        sample_block = "Sample lines:\n" + "\n".join(rows)
+
+    decoded_video = (
+        urllib.parse.unquote(video_file_url) if video_file_url else "(none)"
+    )
+    backend_str = f"{backend}" + (f" ({backend_model})" if backend_model else "")
+
+    lines = [
+        "=== Translation summary ===",
+        f"Request:         {request_id}",
+        f"Video:           {decoded_video}",
+        f"Source language: {source_language_name} (lang={source_language_iso!r})",
+        f"Target language: {target_language}",
+        f"Backend:         {backend_str}",
+        f"Segments:        {n_segs}",
+        f"Output chars:    {total_chars}",
+        script_line,
+        f"Wall time:       {wall_seconds:.1f}s ({int(wall_seconds)//60:02d}:{int(wall_seconds)%60:02d})",
+    ]
+    if sample_block:
+        lines.append("")
+        lines.append(sample_block)
+    return "\n".join(lines) + "\n"
+
+
+def _fmt_timestamp(t: float) -> str:
+    """Render a float-seconds time as ``HH:MM:SS`` for the summary file."""
+    if t < 0:
+        t = 0.0
+    h = int(t // 3600)
+    m = int((t % 3600) // 60)
+    s = int(t % 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 # --------------------------------------------------------------------------- #
@@ -497,14 +620,39 @@ async def asr(
             segments = await run_pipeline_async(audio_path, language)
 
         body, content_type = render(segments, output)
-        # Optional: also write a copy of the SRT next to the source video on
-        # the share, so we get a deterministic .he.srt artifact regardless of
-        # how the calling client names its own save. Best-effort: failures log
-        # but do not affect the HTTP response.
+        wall = time.monotonic() - started
+
+        # Build a human-readable summary of the run — most importantly the
+        # target-script ratio, which would have caught the day-1 NLLB mis-
+        # translation bug instantly. Logged regardless; written to disk only
+        # when the side-file feature is configured.
+        backend = settings.TRANSLATION_BACKEND
+        backend_model = (
+            settings.LOCAL_TRANSLATION_MODEL
+            if backend.strip().lower() == "local"
+            else settings.CLAUDE_MODEL
+        )
         video_file_url = request.query_params.get("video_file") or ""
-        await run_in_thread(_try_save_side_file, body, video_file_url)
+        summary = _build_translation_summary(
+            request_id=request_id,
+            video_file_url=video_file_url,
+            source_language_iso=language,
+            source_language_name=language_name(language),
+            target_language=settings.TARGET_LANGUAGE,
+            backend=backend,
+            backend_model=backend_model,
+            segments=segments,
+            wall_seconds=wall,
+        )
+        log.info("[%s] %s", request_id, summary.replace("\n", "\n[" + request_id + "] "))
+
+        # Optional: also write a copy of the SRT — and the summary — next to
+        # the source video on the share, so we get deterministic artifacts
+        # regardless of how the calling client names its own save. Best-
+        # effort: failures log but do not affect the HTTP response.
+        await run_in_thread(_try_save_side_file, body, summary, video_file_url)
         log.info("[%s] done in %.1fs (%d segments)",
-                 request_id, time.monotonic() - started, len(segments))
+                 request_id, wall, len(segments))
         return PlainTextResponse(body, media_type=content_type)
     finally:
         _jobs_in_system -= 1

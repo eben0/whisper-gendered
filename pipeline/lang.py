@@ -12,6 +12,8 @@ falls back to its default source language).
 
 from __future__ import annotations
 
+import re
+
 # ISO 639-1 → display name. Covers the languages Bazarr would realistically
 # send, plus a few extras. Keep names matching what NLLB_LANGUAGE_CODES and
 # GENDER_AWARE_LANGUAGES use elsewhere in this codebase.
@@ -69,3 +71,44 @@ def language_name(value: str | None, default: str = "English") -> str:
             return canonical
     # Unknown — pass through verbatim. Both backends tolerate this.
     return raw
+
+
+# Primary Unicode script ranges per non-Latin target language. Used by
+# ``target_script_ratio`` to sanity-check that a translated text is actually
+# in the requested target language — caught a real bug where NLLB free-
+# generated Spanish/Romanian/Tswana when targeting Hebrew because the
+# ``forced_bos_token_id`` plumbing had silently broken on transformers 5.x.
+#
+# Latin-script languages (French, Spanish, German, Italian, Portuguese,
+# Romanian, Polish, Dutch, etc.) are intentionally absent — there's no
+# usable Unicode signal distinguishing one Latin-script language from
+# another, so a ratio there would be misleading.
+LANGUAGE_SCRIPTS: dict[str, re.Pattern[str]] = {
+    "Hebrew": re.compile(r"[֐-׿]"),
+    "Arabic": re.compile(r"[؀-ۿݐ-ݿࢠ-ࣿ]"),
+    "Russian": re.compile(r"[Ѐ-ӿ]"),
+    "Ukrainian": re.compile(r"[Ѐ-ӿ]"),
+    "Greek": re.compile(r"[Ͱ-Ͽ]"),
+    "Hindi": re.compile(r"[ऀ-ॿ]"),
+    "Japanese": re.compile(r"[぀-ゟ゠-ヿ一-鿿]"),
+    "Korean": re.compile(r"[가-힯ᄀ-ᇿ㄰-㆏]"),
+    "Chinese": re.compile(r"[一-鿿㐀-䶿]"),
+}
+
+
+def target_script_ratio(text: str, target_language: str) -> float | None:
+    """Fraction of letters in ``text`` matching the target language's script.
+
+    Returns a float in [0.0, 1.0] for languages in ``LANGUAGE_SCRIPTS``;
+    returns ``None`` for languages with no usable script signal (Latin-script
+    languages, where the ratio would not distinguish e.g. French from Spanish).
+    A ratio < ~0.5 on a known non-Latin target almost always means the
+    translation backend wrote the wrong language.
+    """
+    pat = LANGUAGE_SCRIPTS.get(target_language)
+    if pat is None:
+        return None
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return 0.0
+    return sum(1 for c in letters if pat.match(c)) / len(letters)
