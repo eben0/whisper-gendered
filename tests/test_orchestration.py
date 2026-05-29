@@ -360,6 +360,108 @@ def test_asr_response_is_source_side_file_is_target(monkeypatch):
     assert "Script check" in captured["summary"]
 
 
+@pytest.mark.asyncio
+async def test_orchestrator_logs_segment_counts(monkeypatch, caplog):
+    """run_pipeline_async must log input-segment and output-segment counts
+    at INFO so a missing-segment investigation has hard numbers (Plan
+    Task 4 — diagnostic for the 'missing sentences' user-reported issue).
+    """
+    import logging
+    caplog.set_level(logging.INFO, logger="server")
+
+    segs = [
+        Segment(start=0.0, end=1.0, text="line 0"),
+        Segment(start=1.0, end=2.0, text="line 1"),
+        Segment(start=2.0, end=3.0, text="line 2"),
+    ]
+    monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Hebrew")
+    monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 30)
+    monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 1)
+    monkeypatch.setattr(server.transcribe, "transcribe",
+                        lambda path, language="en": list(segs))
+    monkeypatch.setattr(server, "_load_wav_mono",
+                        lambda path: (np.zeros(16000 * 4, dtype=np.float32), 16000))
+    monkeypatch.setattr(server, "get_async_anthropic_client", lambda: object())
+
+    ann = Annotation()
+    ann[PSegment(0.0, 3.0)] = "S"
+    monkeypatch.setattr(server.diarize, "diarize_waveform",
+                        lambda *a, **k: ann)
+    monkeypatch.setattr(server.gender, "detect_genders",
+                        lambda audio, sr, a: {"S": "male"})
+
+    async def fake_translate(texts, gender, target, client,
+                             addressee_gender=None, source_language="English"):
+        return [f"HE: {t}" for t in texts]
+    monkeypatch.setattr(server.translate, "translate_batch_async",
+                        fake_translate)
+
+    await server.run_pipeline_async(server.Path("ignored.wav"), "en")
+
+    msgs = [r.getMessage() for r in caplog.records]
+    # New required log: transcribe count.
+    assert any("transcribed" in m.lower() and "3" in m and "segments" in m.lower()
+               for m in msgs), (
+        f"missing transcribe-count log; messages: {msgs}"
+    )
+    # New required log: translate count.
+    assert any("translated" in m.lower() and "3" in m for m in msgs), (
+        f"missing translate-count log; messages: {msgs}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_logs_error_on_segment_count_mismatch(monkeypatch, caplog):
+    """If translation returns fewer segments than transcribe produced, the
+    orchestrator must emit an ERROR-level log line so the missing-
+    sentence investigation has a clear trigger.
+    """
+    import logging
+    caplog.set_level(logging.ERROR, logger="server")
+
+    segs = [
+        Segment(start=0.0, end=1.0, text="a"),
+        Segment(start=1.0, end=2.0, text="b"),
+        Segment(start=2.0, end=3.0, text="c"),
+    ]
+    monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Hebrew")
+    monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 30)
+    monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 1)
+    monkeypatch.setattr(server.transcribe, "transcribe",
+                        lambda path, language="en": list(segs))
+    monkeypatch.setattr(server, "_load_wav_mono",
+                        lambda path: (np.zeros(16000 * 4, dtype=np.float32), 16000))
+    monkeypatch.setattr(server, "get_async_anthropic_client", lambda: object())
+
+    ann = Annotation()
+    ann[PSegment(0.0, 3.0)] = "S"
+    monkeypatch.setattr(server.diarize, "diarize_waveform",
+                        lambda *a, **k: ann)
+    monkeypatch.setattr(server.gender, "detect_genders",
+                        lambda audio, sr, a: {"S": "male"})
+
+    # Simulate a chunked-translate flow that loses one segment. The
+    # existing alignment fallback in pipeline/translate.py pads with the
+    # source text on length mismatch, so in practice the loss would
+    # surface as duplicate-text rather than a true count mismatch — but
+    # we test the explicit-mismatch error path here by short-circuiting
+    # the pipeline at the count level.
+    async def fake_pipeline_inner_drop(audio_path, segments, target, client,
+                                       source_language="English"):
+        # Return one fewer segment than was passed in.
+        return [Segment(s.start, s.end, f"HE: {s.text}") for s in segments[:-1]]
+    monkeypatch.setattr(server, "_run_gender_aware", fake_pipeline_inner_drop)
+
+    await server.run_pipeline_async(server.Path("ignored.wav"), "en")
+
+    err_msgs = [r.getMessage() for r in caplog.records
+                if r.levelno >= logging.ERROR]
+    assert any("mismatch" in m.lower() or "lost" in m.lower()
+               for m in err_msgs), (
+        f"expected ERROR-level mismatch log; got: {err_msgs}"
+    )
+
+
 def test_asr_skips_side_file_when_target_is_none(monkeypatch):
     # When TARGET_LANGUAGE=none the pipeline returns (source, None). The /asr
     # route should return the source transcript and NOT call the side-file
