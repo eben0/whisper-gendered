@@ -1,1 +1,1 @@
-Transliterate proper nouns (people's names, place names, brand names, nicknames) into the {target_language} script: write them as the audience would naturally read them aloud, not as Latin letters. Example: 'Mondo' -> 'מונדו', 'T' -> 'טי'.
+Transliterate proper nouns (names, places, brands, nicknames) into the {target_language} script, not Latin letters. E.g., 'Mondo' → 'מונדו', 'T' → 'טי'.

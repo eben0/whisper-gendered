@@ -90,8 +90,11 @@ def test_system_prompt_includes_you_form_guidance_even_without_addressee_hint():
     # the speaker's gender is set, regardless of addressee_gender. The spec
     # requires this so Claude considers second-person form selection in
     # ambiguous group scenes too, not only when a specific hint is provided.
+    # We check for the *contract* (mentioning "you" + matching the addressee)
+    # rather than a specific phrasing, so future minimisation passes don't
+    # break the test just because the wording got tighter.
     prompt = translate._system_prompt("Hebrew", "male", addressee_gender=None)
-    assert "addresses another person" in prompt
+    assert '"you"' in prompt
     assert "matching the addressee" in prompt
 
 

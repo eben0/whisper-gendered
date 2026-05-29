@@ -1,1 +1,1 @@
-Render slang, idioms, and figures of speech with their natural {target_language} equivalents — not literal word-for-word calques. If a {source_language} idiom has no clean equivalent, prefer the closest colloquial phrasing in {target_language}.
+Render slang and idioms as natural {target_language} equivalents, not literal calques. If no clean equivalent exists, use the closest colloquial phrasing.

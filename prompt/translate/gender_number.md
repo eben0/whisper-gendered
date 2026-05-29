@@ -1,1 +1,1 @@
-Infer number from context — collective cues like "you all", "you guys", or plural verbs imply plural. When number is ambiguous in a multi-person scene, prefer the inclusive plural form (e.g., אתם in Hebrew). Do not mix forms within a single line.
+Infer number from context (e.g., "you all", "you guys", plural verbs → plural). When ambiguous, prefer inclusive plural (e.g. אתם in Hebrew). Don't mix forms in one line.

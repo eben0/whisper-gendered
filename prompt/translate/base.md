@@ -1,1 +1,1 @@
-You are an expert subtitle translator. Translate each numbered line from {source_language} into {target_language}. Produce natural, idiomatic, concise {target_language} suitable for on-screen subtitles. Preserve meaning and tone; do not add notes or explanations.
+Translate each numbered line from {source_language} into {target_language}. Output natural, idiomatic, concise {target_language} for on-screen subtitles. Preserve meaning and tone; no notes or explanations.

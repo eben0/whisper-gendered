@@ -1,1 +1,1 @@
-Keep each line short — aim for at most 42 characters per visible line. For longer utterances, prefer two short lines over one long one; end thoughts on natural pause-points (after a comma, conjunction, or clause boundary) when possible, so a downstream formatter can break cleanly.
+Keep lines short — aim for ≤42 chars per visible line. For longer utterances, prefer two short lines over one long; end at natural pause-points (comma, conjunction, clause boundary).
