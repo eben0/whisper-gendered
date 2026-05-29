@@ -378,7 +378,11 @@ def test_asr_response_is_source_side_file_is_target(monkeypatch):
     source_segs = [Segment(start=0.0, end=1.0, text="hello world")]
     target_segs = [Segment(start=0.0, end=1.0, text="שלום עולם")]
 
-    async def fake_pipeline(audio_path, language):
+    async def fake_pipeline(audio_path, language, _artifacts_out=None):
+        if _artifacts_out is not None:
+            _artifacts_out.append(server._PipelineArtifacts(
+                raw_segments=list(source_segs), annotations=[],
+            ))
         return source_segs, target_segs
     monkeypatch.setattr(server, "run_pipeline_async", fake_pipeline)
 
@@ -507,9 +511,15 @@ async def test_orchestrator_logs_error_on_segment_count_mismatch(monkeypatch, ca
     # we test the explicit-mismatch error path here by short-circuiting
     # the pipeline at the count level.
     async def fake_pipeline_inner_drop(audio_path, segments, target, client,
-                                       source_language="English"):
-        # Return one fewer segment than was passed in.
-        return [Segment(s.start, s.end, f"HE: {s.text}") for s in segments[:-1]]
+                                       source_language="English",
+                                       precomputed_annotations=None):
+        # Return one fewer segment than was passed in. ``_run_gender_aware``
+        # now returns ``(segments, annotations_used)``; the empty list
+        # satisfies the contract without exercising the alt-pass path.
+        dropped = [
+            Segment(s.start, s.end, f"HE: {s.text}") for s in segments[:-1]
+        ]
+        return dropped, []
     monkeypatch.setattr(server, "_run_gender_aware", fake_pipeline_inner_drop)
 
     await server.run_pipeline_async(server.Path("ignored.wav"), "en")
@@ -530,7 +540,9 @@ def test_asr_skips_side_file_when_target_is_none(monkeypatch):
 
     source_segs = [Segment(start=0.0, end=1.0, text="just english")]
 
-    async def fake_pipeline(audio_path, language):
+    async def fake_pipeline(audio_path, language, _artifacts_out=None):
+        # ``target_segments=None`` → no A/B alt-pass invoked, so artifact
+        # capture is irrelevant; just match the signature.
         return source_segs, None
     monkeypatch.setattr(server, "run_pipeline_async", fake_pipeline)
     monkeypatch.setattr(server, "encode_to_wav", lambda src, dst: None)
@@ -705,11 +717,18 @@ def test_asr_emits_alt_classifier_srt_when_ab_output_enabled(monkeypatch):
     target_segs = [Segment(start=0.0, end=1.0, text="שלום")]
     alt_target  = [Segment(start=0.0, end=1.0, text="שלום-ALT")]
 
-    async def fake_pipeline(audio_path, language):
+    async def fake_pipeline(audio_path, language, _artifacts_out=None):
+        if _artifacts_out is not None:
+            _artifacts_out.append(server._PipelineArtifacts(
+                raw_segments=list(source_segs), annotations=[],
+            ))
         return source_segs, target_segs
     monkeypatch.setattr(server, "run_pipeline_async", fake_pipeline)
 
-    async def fake_alt(audio_path, language):
+    async def fake_alt(audio_path, language, artifacts):
+        # New signature post-OOM fix: artifacts param replaces the
+        # redundant re-transcribe / re-diarize. The fake doesn't need to
+        # use them but must accept the kwarg so /asr's call compiles.
         return source_segs, alt_target
     monkeypatch.setattr(server, "run_pipeline_alt_classifier", fake_alt)
 
@@ -745,3 +764,76 @@ def test_asr_emits_alt_classifier_srt_when_ab_output_enabled(monkeypatch):
     # Bodies differ between primary and alt.
     alt_body = next(b for s, b in saved if ".alt-classifier" in s)
     assert "שלום-ALT" in alt_body
+
+
+@pytest.mark.asyncio
+async def test_alt_classifier_reuses_artifacts_without_retranscribe(monkeypatch):
+    """A/B alt-classifier pass MUST NOT call transcribe.transcribe or
+    diarize.diarize_waveform — it should reuse the primary pass's
+    artifacts. This is the fix for the CUDA OOM that fires on 8GB cards
+    when the alt pass triggers a back-to-back Whisper inference.
+    """
+    monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Hebrew")
+    monkeypatch.setattr(server.settings, "GENDER_CLASSIFIER", "pitch")
+    monkeypatch.setattr(server.settings, "TRANSLATION_BACKEND", "claude")
+    monkeypatch.setattr(server, "get_async_anthropic_client", lambda: object())
+
+    # Counters: if these go above 0 the regression is back.
+    transcribe_calls = []
+    diarize_calls = []
+    monkeypatch.setattr(server.transcribe, "transcribe",
+                        lambda *a, **k: transcribe_calls.append(a) or [])
+    monkeypatch.setattr(server.diarize, "diarize_waveform",
+                        lambda *a, **k: diarize_calls.append(a) or None)
+
+    # Stub _run_gender_aware to (a) capture its precomputed_annotations
+    # arg and (b) return without touching real diarize.
+    captured: dict = {}
+    async def fake_gender_aware(audio_path, segments, target, client,
+                                source_language="English",
+                                precomputed_annotations=None):
+        captured["precomputed_annotations"] = precomputed_annotations
+        captured["segments_texts"] = [s.text for s in segments]
+        # Mutate segments to simulate translation, return (segs, anns).
+        for s in segments:
+            s.text = f"ALT: {s.text}"
+        return segments, []
+    monkeypatch.setattr(server, "_run_gender_aware", fake_gender_aware)
+
+    # Pre-fabricated artifacts as if a primary pass had produced them.
+    raw = [
+        Segment(start=0.0, end=1.0, text="hello"),
+        Segment(start=1.0, end=2.0, text="world"),
+    ]
+    sentinel_ann_chunk0 = object()  # opaque per-chunk annotation marker
+    artifacts = server._PipelineArtifacts(
+        raw_segments=raw,
+        annotations=[sentinel_ann_chunk0],
+    )
+
+    source, target = await server.run_pipeline_alt_classifier(
+        server.Path("ignored.wav"), "en", artifacts,
+    )
+
+    # The fix's core guarantee: zero re-transcribe, zero re-diarize.
+    assert transcribe_calls == [], (
+        f"alt pass called transcribe.transcribe — defeats the fix "
+        f"({len(transcribe_calls)} calls)"
+    )
+    assert diarize_calls == [], (
+        f"alt pass called diarize.diarize_waveform — defeats the fix "
+        f"({len(diarize_calls)} calls)"
+    )
+    # The precomputed annotations from the primary pass reached the
+    # gender-aware orchestrator.
+    assert captured["precomputed_annotations"] == [sentinel_ann_chunk0], (
+        f"primary's annotations did not reach _run_gender_aware; got "
+        f"{captured['precomputed_annotations']!r}"
+    )
+    # Fresh segments were built from artifacts (not the primary's mutated
+    # outputs).
+    assert captured["segments_texts"] == ["hello", "world"]
+    # Target segments hold the alt-pass translation; source segments hold
+    # the artifact's raw text (independent of any in-place mutation).
+    assert [s.text for s in target] == ["ALT: hello", "ALT: world"]
+    assert [s.text for s in source] == ["hello", "world"]

@@ -22,7 +22,9 @@ import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 def _register_cuda_dll_dirs() -> None:
@@ -477,15 +479,44 @@ async def _translate_chunk(
             raise
 
 
+@dataclass
+class _PipelineArtifacts:
+    """Captured intermediates from a primary pass for A/B alt reuse.
+
+    Lets the A/B alt-classifier pass skip the expensive Whisper transcribe
+    and pyannote diarize steps and replay only gender + translate with the
+    flipped classifier. Both fields are populated by ``run_pipeline_async``
+    when its ``_artifacts_out`` parameter is provided.
+
+    ``raw_segments``: source-language transcript instances (independent of
+    the primary pass's in-place translation mutations).
+    ``annotations``: one pyannote ``Annotation`` per chunk produced by
+    ``make_chunks`` in the same order. Empty list when the pipeline ran
+    the non-gender-aware path (no diarization performed).
+    """
+    raw_segments: list[Segment]
+    annotations: list[Any]
+
+
 async def _run_gender_aware(
     audio_path: Path,
     segments: list[Segment],
     target: str,
     client,
     source_language: str = "English",
-) -> list[Segment]:
+    precomputed_annotations: list[Any] | None = None,
+) -> tuple[list[Segment], list[Any]]:
+    """Gender-aware chunked translate. Returns ``(segments, annotations_used)``.
+
+    When ``precomputed_annotations`` is provided (A/B alt path), reuses
+    those instead of running pyannote diarization per chunk — saves the
+    ~2-3 minutes of GPU time and the VRAM pressure of a second diarize.
+    Gender classification still runs on every call (it's cheap, and the
+    classifier may have been flipped between passes).
+    """
     audio, sr = await run_in_thread(_load_wav_mono, audio_path)
     chunks = make_chunks(segments, settings.CHUNK_DURATION_SEC)
+    annotations_used: list[Any] = []
     sem = asyncio.Semaphore(settings.TRANSLATE_CONCURRENCY)
     # Per-request rolling window of recent source-language lines, SHARED
     # across all chunks so chunk N's last group's source text flows into
@@ -500,13 +531,33 @@ async def _run_gender_aware(
     t1 = time.monotonic()
     try:
         for idx, chunk in enumerate(chunks):
-            annotation, genders = await run_in_thread(
-                _diarize_and_gender, audio, sr, chunk.start, chunk.end
-            )
-            log.info(
-                "chunk %d/%d diarize+gender done (%d speakers)",
-                idx + 1, len(chunks), len(genders),
-            )
+            if precomputed_annotations is not None:
+                # A/B alt path: reuse the primary pass's diarization. Only
+                # re-run gender classification (cheap) against the current
+                # ``settings.GENDER_CLASSIFIER`` which the alt wrapper has
+                # flipped. The audio slice is regenerated locally because it's
+                # cheap (a numpy view, not a copy).
+                annotation = precomputed_annotations[idx]
+                i0 = max(0, int(chunk.start * sr))
+                i1 = min(len(audio), int(chunk.end * sr))
+                slice_ = audio[i0:i1]
+                genders = await run_in_thread(
+                    gender.detect_genders, slice_, sr, annotation,
+                )
+                log.info(
+                    "chunk %d/%d alt-pass gender only (%d speakers; "
+                    "diarization reused from primary)",
+                    idx + 1, len(chunks), len(genders),
+                )
+            else:
+                annotation, genders = await run_in_thread(
+                    _diarize_and_gender, audio, sr, chunk.start, chunk.end
+                )
+                log.info(
+                    "chunk %d/%d diarize+gender done (%d speakers)",
+                    idx + 1, len(chunks), len(genders),
+                )
+            annotations_used.append(annotation)
             # Build chunk-local assignment + groups.
             assigned: list[tuple[Segment, str | None]] = []
             for seg in chunk.segments:
@@ -536,7 +587,7 @@ async def _run_gender_aware(
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
     log.info("gender-aware chunks complete: %.1fs", time.monotonic() - t1)
-    return [seg for chunk in chunks for seg in chunk.segments]
+    return [seg for chunk in chunks for seg in chunk.segments], annotations_used
 
 
 async def _run_plain_translate(
@@ -588,7 +639,8 @@ async def _run_plain_translate(
 
 
 async def run_pipeline_async(
-    audio_path: Path, language: str
+    audio_path: Path, language: str,
+    _artifacts_out: list[_PipelineArtifacts] | None = None,
 ) -> tuple[list[Segment], list[Segment] | None]:
     """Transcribe and (optionally) translate, overlapping diarize and translate.
 
@@ -602,6 +654,13 @@ async def run_pipeline_async(
     Bazarr's whisperai plugin stores our response body to disk under a filename
     derived from the requested language (e.g. ``*.en.srt``), and a Hebrew body
     would clobber any pre-existing English subtitle there.
+
+    ``_artifacts_out`` is an optional out-container: when the caller passes
+    an empty list, this function appends a single ``_PipelineArtifacts``
+    holding the raw source segments and per-chunk diarization annotations.
+    Used by the /asr handler so the A/B alt-classifier pass can skip
+    re-transcribing and re-diarizing (which OOM'd on 8GB cards). Tests
+    leave the parameter at its default and observe no behavior change.
     """
     t0 = time.monotonic()
     segments = await run_in_thread(transcribe.transcribe, audio_path, language)
@@ -638,8 +697,9 @@ async def run_pipeline_async(
         client = None
     else:
         client = get_async_anthropic_client()
+    annotations: list[Any] = []
     if settings.is_gender_aware():
-        target_segments = await _run_gender_aware(
+        target_segments, annotations = await _run_gender_aware(
             audio_path, segments, target, client, source_language,
         )
     else:
@@ -676,18 +736,36 @@ async def run_pipeline_async(
         Segment(t.start, t.end, src)
         for t, src in zip(target_segments, source_texts)
     ]
+    if _artifacts_out is not None:
+        # Hand the primary pass's reusable intermediates back to the caller
+        # (the /asr handler) so an A/B alt-classifier pass can skip
+        # transcribe + diarize. ``raw_segments`` are fresh instances built
+        # from the pre-translation source text so a later alt-pass
+        # mutation can't leak into ``source_segments``.
+        _artifacts_out.append(_PipelineArtifacts(
+            raw_segments=[
+                Segment(s.start, s.end, src)
+                for s, src in zip(segments, source_texts)
+            ],
+            annotations=annotations,
+        ))
     return source_segments, target_segments
 
 
 async def run_pipeline_alt_classifier(
-    audio_path: Path, language: str,
+    audio_path: Path, language: str, artifacts: _PipelineArtifacts,
 ) -> tuple[list[Segment], list[Segment] | None]:
-    """Same as ``run_pipeline_async`` but flips ``GENDER_CLASSIFIER`` to
-    the alternate of whatever's currently configured, runs the pipeline,
-    and restores the original value.
+    """A/B alt pass: re-translate using the alternate gender classifier,
+    REUSING the primary pass's transcribe and diarize results.
 
-    Cost: one extra full pipeline pass per request. Only invoked when
-    ``GENDER_AB_OUTPUT=true``; defaults are off.
+    Skips Whisper (~4 min on this hardware) and pyannote (~2 min). Only
+    re-runs the cheap gender classification and the LLM translation per
+    chunk with the flipped ``GENDER_CLASSIFIER``. Without this reuse the
+    second pass triggers a back-to-back Whisper inference and CUDA OOMs
+    on 8 GB cards — that's the bug this function exists to fix.
+
+    ``artifacts`` is the value the primary ``run_pipeline_async`` call
+    appended into the caller's ``_artifacts_out`` list.
 
     Concurrency: this function mutates the process-global
     ``settings.GENDER_CLASSIFIER`` for the duration of the call. The
@@ -707,7 +785,46 @@ async def run_pipeline_alt_classifier(
     old = settings.GENDER_CLASSIFIER
     try:
         settings.GENDER_CLASSIFIER = alt
-        return await run_pipeline_async(audio_path, language)
+
+        # Build fresh source segments so this pass's in-place text mutation
+        # doesn't touch the primary's outputs (or the artifacts themselves —
+        # the caller may want to re-invoke alt on the same artifacts).
+        fresh_segments = [
+            Segment(s.start, s.end, s.text) for s in artifacts.raw_segments
+        ]
+        if not settings.translation_enabled() or not fresh_segments:
+            return fresh_segments, None
+
+        target = settings.TARGET_LANGUAGE
+        source_language = language_name(language)
+        if settings.TRANSLATION_BACKEND.strip().lower() == "local":
+            client = None
+        else:
+            client = get_async_anthropic_client()
+
+        if settings.is_gender_aware():
+            # The win: pass precomputed_annotations so _run_gender_aware
+            # skips the expensive per-chunk diarize call.
+            target_segments, _ = await _run_gender_aware(
+                audio_path, fresh_segments, target, client, source_language,
+                precomputed_annotations=artifacts.annotations,
+            )
+        else:
+            # Non-gender-aware target: gender label is unused by the
+            # prompt, so flipping the classifier produces the same output
+            # as the primary. Still translate to keep the contract (caller
+            # may rely on a non-None second SRT).
+            target_segments = await _run_plain_translate(
+                fresh_segments, target, client, source_language,
+            )
+
+        # Reconstruct source from the artifact's raw_segments (which carry
+        # the un-translated text — fresh_segments has been mutated above).
+        source_segments = [
+            Segment(t.start, t.end, raw.text)
+            for t, raw in zip(target_segments, artifacts.raw_segments)
+        ]
+        return source_segments, target_segments
     finally:
         settings.GENDER_CLASSIFIER = old
 
@@ -817,8 +934,15 @@ async def asr(
             # transcribe step (CUDA error: out of memory) even though both
             # requests fit individually when the process is fresh.
             _empty_cuda_cache()
+            # Capture primary pipeline artifacts (raw segments + per-chunk
+            # diarization annotations) only when the A/B alt pass will
+            # actually run — keeps memory cost of the out-container at zero
+            # for typical requests where GENDER_AB_OUTPUT is off.
+            artifacts_out: list[_PipelineArtifacts] | None = (
+                [] if settings.GENDER_AB_OUTPUT else None
+            )
             source_segments, target_segments = await run_pipeline_async(
-                audio_path, language,
+                audio_path, language, _artifacts_out=artifacts_out,
             )
             # A/B alt-classifier pass: must run INSIDE the semaphore because
             # run_pipeline_alt_classifier mutates the global
@@ -827,11 +951,17 @@ async def asr(
             # mid-alt would observe the flipped value and use the wrong
             # classifier on its primary pass. Render + side-file save remain
             # outside the semaphore below — they're I/O-only, no global
-            # mutation.
-            if settings.GENDER_AB_OUTPUT and target_segments is not None:
+            # mutation. The alt pass reuses the primary's transcribe and
+            # diarize results via ``artifacts`` so it doesn't OOM on
+            # 8 GB cards (back-to-back Whisper inferences peaked over budget).
+            if (
+                settings.GENDER_AB_OUTPUT
+                and target_segments is not None
+                and artifacts_out
+            ):
                 try:
                     _, alt_target = await run_pipeline_alt_classifier(
-                        audio_path, language,
+                        audio_path, language, artifacts_out[0],
                     )
                 except Exception:
                     log.exception(
