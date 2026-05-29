@@ -10,6 +10,7 @@ Speakers with no detectable voiced frames default to "male".
 from __future__ import annotations
 
 import logging
+import time
 
 import librosa
 import numpy as np
@@ -100,8 +101,12 @@ def _classify_speaker(
             return _classify_f0(voiced_f0)
 
     if mode == "ensemble":
+        t0 = time.perf_counter()
         pitch_label = _classify_f0(voiced_f0)
+        pitch_dt = time.perf_counter() - t0
+
         from pipeline import gender_ml
+        t0 = time.perf_counter()
         try:
             ml_label, ml_conf = gender_ml.classify_audio(signal, sr)
         except Exception:
@@ -111,6 +116,20 @@ def _classify_speaker(
                 exc_info=True,
             )
             return pitch_label
+        ml_dt = time.perf_counter() - t0
+
+        # Read through ``config.settings`` (not the cached import-time alias)
+        # so a runtime ``importlib.reload(config)`` — or a test that rebinds
+        # ``config.settings.X`` — is observed by this dispatcher.
+        budget = float(config.settings.GENDER_ML_TIME_BUDGET_RATIO)
+        if budget > 0 and pitch_dt > 0 and ml_dt > pitch_dt * budget:
+            log.warning(
+                "Speaker %s ML classifier slow: ml=%.2fs vs pitch=%.4fs "
+                "(ratio %.1fx > budget %.1fx)",
+                speaker_label, ml_dt, pitch_dt,
+                ml_dt / max(pitch_dt, 1e-6), budget,
+            )
+
         if ml_label != pitch_label:
             log.info(
                 "Speaker %s classifiers disagree: pitch=%s ml=%s (conf=%.3f) "

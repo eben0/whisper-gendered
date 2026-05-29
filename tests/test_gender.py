@@ -161,6 +161,30 @@ def test_detect_genders_ensemble_logs_disagreement(monkeypatch, caplog):
     )
 
 
+def test_ensemble_warns_when_ml_too_slow(monkeypatch, caplog):
+    """When ML classifier wall time exceeds pitch by more than the budget
+    ratio, _classify_speaker emits a WARNING."""
+    import logging, time
+    caplog.set_level(logging.WARNING, logger="pipeline.gender")
+    monkeypatch.setattr("config.settings.GENDER_CLASSIFIER", "ensemble")
+    monkeypatch.setattr("config.settings.GENDER_ML_TIME_BUDGET_RATIO", 2.0)
+
+    def slow_ml(audio, sr):
+        time.sleep(0.05)  # ML "takes" 50ms; pitch is near-instant.
+        return ("female", 0.9)
+    monkeypatch.setattr("pipeline.gender_ml.classify_audio", slow_ml)
+
+    from pipeline import gender as g
+    low = _tone(120.0)
+    ann = Annotation()
+    ann[PSegment(0.0, 1.0)] = "SPEAKER_X"
+    g.detect_genders(low, SR, ann)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("slow" in m.lower() and "ml" in m.lower()
+               for m in msgs), f"no perf warning; got {msgs}"
+
+
 def test_detect_genders_ensemble_falls_back_to_pitch_when_ml_errors(monkeypatch, caplog):
     """If the ML call raises, ensemble mode must not crash the request —
     log a warning and use the pitch answer.

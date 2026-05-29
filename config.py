@@ -69,6 +69,9 @@ class Settings:
         "GENDER_ML_MODEL",
         "alefiury/wav2vec2-large-xlsr-53-gender-recognition-librispeech",
     )
+    # WARNING is emitted when ML classifier wall time per speaker exceeds
+    # the pitch classifier's wall time × this ratio. 0 disables the gate.
+    GENDER_ML_TIME_BUDGET_RATIO: float = _env_float("GENDER_ML_TIME_BUDGET_RATIO", 5.0)
     # When true, the orchestrator also emits a second *.he.srt next to the
     # primary one using the *other* classifier (pitch vs ML) so the
     # operator can A/B them on a real episode.
