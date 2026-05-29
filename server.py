@@ -410,6 +410,7 @@ async def _translate_chunk(
     sem: asyncio.Semaphore,
     prev_speaker_gender: str | None,
     source_language: str = "English",
+    context_window: list[str] | None = None,
 ) -> None:
     """Translate one chunk's pre-built speaker groups in place.
 
@@ -419,6 +420,22 @@ async def _translate_chunk(
     rotation: the first group's addressee is "whoever spoke before this chunk"
     (or ``None`` for the very first chunk). ``source_language`` is the
     request's audio language (display name) used in the translation prompt.
+
+    ``context_window`` (Plan Task 7) is a SHARED mutable rolling buffer of the
+    most recent source-text lines seen by the orchestrator. Each group's
+    translate call receives an immutable snapshot of the window at call time as
+    ``previous_context``; after the call, this function appends the group's
+    source texts and trims to ``settings.TRANSLATE_CONTEXT_LINES`` so the next
+    group/chunk sees the updated window. Pass the SAME list reference to every
+    chunk's task so cross-chunk flow accumulates. ``None`` disables the
+    feature (no snapshot taken, no mutation).
+
+    Concurrency caveat: with ``TRANSLATE_CONCURRENCY > 1`` chunks run in
+    parallel and the order in which groups extend ``context_window`` becomes
+    non-deterministic — the window then degrades to a best-effort temporal
+    ordering, which is still a useful LLM context cue but not a strict
+    transcript prefix. Tests pin ``TRANSLATE_CONCURRENCY=1`` to keep
+    assertions deterministic.
     """
     async with sem:
         prev_group_gender = prev_speaker_gender
@@ -433,13 +450,27 @@ async def _translate_chunk(
                     if settings.ADDRESSEE_GENDER_HINT_ENABLED
                     else None
                 )
+                # Capture source text BEFORE mutating seg.text below — otherwise
+                # the rolling window would accumulate target-language strings.
+                source_texts = [s.text for s in group]
+                ctx_snapshot = (
+                    list(context_window) if context_window else []
+                )
                 translated = await translate.translate_batch_async(
-                    [s.text for s in group], spk_gender, target, client,
+                    source_texts, spk_gender, target, client,
                     addressee_gender=addressee,
                     source_language=source_language,
+                    previous_context=ctx_snapshot,
                 )
                 for seg, text in zip(group, translated):
                     seg.text = text
+                if context_window is not None:
+                    context_window.extend(source_texts)
+                    max_n = settings.TRANSLATE_CONTEXT_LINES
+                    if max_n <= 0:
+                        del context_window[:]
+                    elif len(context_window) > max_n:
+                        del context_window[: len(context_window) - max_n]
                 prev_group_gender = spk_gender
         except Exception:
             log.exception("[chunk %d] translation failed", idx)
@@ -456,6 +487,15 @@ async def _run_gender_aware(
     audio, sr = await run_in_thread(_load_wav_mono, audio_path)
     chunks = make_chunks(segments, settings.CHUNK_DURATION_SEC)
     sem = asyncio.Semaphore(settings.TRANSLATE_CONCURRENCY)
+    # Per-request rolling window of recent source-language lines, SHARED
+    # across all chunks so chunk N's last group's source text flows into
+    # chunk N+1's first call as previous_context. This is safe because the
+    # window holds SOURCE text — unlike per-chunk speaker labels, source
+    # text has no pyannote-renumbering problem at chunk boundaries.
+    # ``None`` disables the feature entirely (TRANSLATE_CONTEXT_LINES=0).
+    context_window: list[str] | None = (
+        [] if settings.TRANSLATE_CONTEXT_LINES > 0 else None
+    )
     tasks: list[asyncio.Task] = []
     t1 = time.monotonic()
     try:
@@ -485,6 +525,7 @@ async def _run_gender_aware(
                     # ``_translate_chunk`` is unaffected.
                     idx, groups, genders, target, client, sem,
                     None, source_language,
+                    context_window=context_window,
                 )
             ))
         await asyncio.gather(*tasks)
@@ -506,15 +547,33 @@ async def _run_plain_translate(
 ) -> list[Segment]:
     chunks = make_chunks(segments, settings.CHUNK_DURATION_SEC)
     sem = asyncio.Semaphore(settings.TRANSLATE_CONCURRENCY)
+    # Same rolling-window pattern as ``_run_gender_aware`` (Plan Task 7):
+    # a single shared list flows across all chunks of the request. Best-effort
+    # temporal order when TRANSLATE_CONCURRENCY > 1; deterministic at 1.
+    context_window: list[str] | None = (
+        [] if settings.TRANSLATE_CONTEXT_LINES > 0 else None
+    )
 
     async def translate_one(chunk):
         async with sem:
+            # Capture source BEFORE mutation so the window doesn't accumulate
+            # target-language text.
+            source_texts = [s.text for s in chunk.segments]
+            ctx_snapshot = list(context_window) if context_window else []
             translated = await translate.translate_batch_async(
-                [s.text for s in chunk.segments], None, target, client,
+                source_texts, None, target, client,
                 source_language=source_language,
+                previous_context=ctx_snapshot,
             )
             for seg, text in zip(chunk.segments, translated):
                 seg.text = text
+            if context_window is not None:
+                context_window.extend(source_texts)
+                max_n = settings.TRANSLATE_CONTEXT_LINES
+                if max_n <= 0:
+                    del context_window[:]
+                elif len(context_window) > max_n:
+                    del context_window[: len(context_window) - max_n]
 
     tasks = [asyncio.create_task(translate_one(c)) for c in chunks]
     try:
