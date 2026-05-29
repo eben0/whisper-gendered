@@ -734,6 +734,19 @@ async def warmup() -> None:
                 log.info("Pyannote warm-up complete.")
             except Exception:
                 log.exception("Pyannote warm-up failed (continuing anyway).")
+        # Warm the wav2vec2 gender classifier when it's actually going to be
+        # used. This amortizes the ~1.2 GB model load so the first request
+        # doesn't pay for it (and so the Task 8 perf gate doesn't
+        # false-positive on cold start with ml_dt = pitch + 5–30s of load).
+        if (
+            settings.GENDER_CLASSIFIER.strip().lower() in ("ml", "ensemble")
+            and settings.is_gender_aware()
+        ):
+            try:
+                from pipeline import gender_ml
+                await run_in_thread(gender_ml.warmup)
+            except Exception:
+                log.exception("gender_ml warm-up failed; falling back to lazy load.")
         # Local translation model is large (NLLB-200 distilled is ~2.4 GB) and
         # would otherwise load on the first /asr request — well past Bazarr's
         # client timeout. Pre-load it here. Claude backend has nothing to warm.

@@ -65,6 +65,7 @@ def _classify_speaker(
     sr: int,
     speaker_label: str,
     voiced_f0: np.ndarray,
+    pitch_pyin_dt: float = 0.0,
 ) -> str:
     """Return "male" | "female" using the configured classifier.
 
@@ -72,6 +73,11 @@ def _classify_speaker(
     ``signal`` is the raw concatenated audio for the ML classifier. Both
     are computed once by ``detect_genders`` so the dispatcher just chooses
     among them.
+
+    ``pitch_pyin_dt`` is the wall-clock cost of the upstream
+    ``librosa.pyin`` call — that IS the pitch classifier's real work, so
+    the ensemble perf gate compares against it (not against the
+    microsecond-scale ``_classify_f0`` median).
     """
     # Read through ``config.settings`` (not the import-time-bound ``settings``
     # alias) so tests that reload ``config`` — and any future runtime
@@ -101,9 +107,12 @@ def _classify_speaker(
             return _classify_f0(voiced_f0)
 
     if mode == "ensemble":
-        t0 = time.perf_counter()
+        # The pitch classifier's real work is ``librosa.pyin`` upstream in
+        # ``detect_genders`` — ``_classify_f0`` is just a microsecond-scale
+        # median over its output. Compare ML wall time against the pyin
+        # cost so the gate's ratio is meaningful.
         pitch_label = _classify_f0(voiced_f0)
-        pitch_dt = time.perf_counter() - t0
+        pitch_dt = pitch_pyin_dt
 
         from pipeline import gender_ml
         t0 = time.perf_counter()
@@ -181,11 +190,20 @@ def detect_genders(
             continue
 
         signal = np.concatenate(chunks)
+        # Time ``librosa.pyin`` — the actual pitch-classification work — so
+        # the ensemble perf gate in ``_classify_speaker`` compares ML wall
+        # time against the right number. The post-processing median in
+        # ``_classify_f0`` is microsecond-scale and would make the gate
+        # trip on every speaker.
+        t0 = time.perf_counter()
         f0, voiced_flag, _voiced_prob = librosa.pyin(
             signal, sr=sr, fmin=FMIN_HZ, fmax=FMAX_HZ,
         )
+        pitch_pyin_dt = time.perf_counter() - t0
         voiced_f0 = f0[np.isfinite(f0)]
-        gender = _classify_speaker(signal, sr, str(speaker), f0)
+        gender = _classify_speaker(
+            signal, sr, str(speaker), f0, pitch_pyin_dt=pitch_pyin_dt,
+        )
 
         # Log with enough context that an investigation (e.g. for the
         # S04E05 04:29 misclassification) can tell whether the call was
