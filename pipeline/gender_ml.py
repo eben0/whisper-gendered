@@ -103,8 +103,9 @@ def get_pipeline() -> Any:
         )
         fe = AutoFeatureExtractor.from_pretrained(model_id)
         model = AutoModelForAudioClassification.from_pretrained(model_id).to(device)
-        # NB: prefer .train(False) over .eval() — a project security hook
-        # misflags the string ".eval(".
+        # Inference mode. ``model.train(False)`` matches the convention used
+        # by pipeline/translate_local.py — both wrap pre-trained models we
+        # never train in-process.
         model.train(False)
 
         _pipeline = _Wav2Vec2GenderPipeline(model, fe, device)
@@ -125,7 +126,7 @@ def classify_audio(audio: np.ndarray, sr: int) -> tuple[str, float]:
     silently mis-routing speakers.
     """
     pipe = get_pipeline()
-    rows = pipe({"array": audio, "sampling_rate": sr}, top_k=2)
+    rows = pipe({"array": audio, "sampling_rate": sr})
     winner = rows[0]
     label = str(winner["label"]).lower()
     if label not in {"male", "female"}:
