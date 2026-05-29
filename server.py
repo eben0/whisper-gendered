@@ -629,6 +629,15 @@ async def run_pipeline_alt_classifier(
 
     Cost: one extra full pipeline pass per request. Only invoked when
     ``GENDER_AB_OUTPUT=true``; defaults are off.
+
+    Concurrency: this function mutates the process-global
+    ``settings.GENDER_CLASSIFIER`` for the duration of the call. The
+    caller MUST hold the GPU semaphore (or otherwise serialize against
+    other pipeline invocations) before calling, otherwise a concurrent
+    request could observe the flipped value and use the wrong classifier
+    on its own pipeline pass. The mutation is try/finally-restored, but
+    that only protects the *post*-call state, not concurrent in-flight
+    work.
     """
     primary = settings.GENDER_CLASSIFIER.strip().lower()
     alt = {
@@ -725,6 +734,8 @@ async def asr(
         else:
             await run_in_thread(prepare_unencoded, raw_path, audio_path)
 
+        alt_target = None  # initialized for the post-semaphore block
+
         async with _semaphore:
             # Reclaim cached-but-unused VRAM left by a previous request before
             # touching the GPU. The PyTorch caching allocator does not return
@@ -737,6 +748,26 @@ async def asr(
             source_segments, target_segments = await run_pipeline_async(
                 audio_path, language,
             )
+            # A/B alt-classifier pass: must run INSIDE the semaphore because
+            # run_pipeline_alt_classifier mutates the global
+            # settings.GENDER_CLASSIFIER for the duration of the call. If we
+            # released the semaphore first, a concurrent request entering it
+            # mid-alt would observe the flipped value and use the wrong
+            # classifier on its primary pass. Render + side-file save remain
+            # outside the semaphore below — they're I/O-only, no global
+            # mutation.
+            if settings.GENDER_AB_OUTPUT and target_segments is not None:
+                try:
+                    _, alt_target = await run_pipeline_alt_classifier(
+                        audio_path, language,
+                    )
+                except Exception:
+                    log.exception(
+                        "[%s] A/B alt-classifier pass failed; primary "
+                        "side-file will still be written",
+                        request_id,
+                    )
+                    alt_target = None
 
         # The HTTP response carries the SOURCE-language transcript so Bazarr's
         # whisperai plugin writes the response to its language-matching path
@@ -777,29 +808,21 @@ async def asr(
                 _try_save_side_file, target_body, summary, video_file_url,
             )
 
-            if settings.GENDER_AB_OUTPUT:
-                try:
-                    alt_source, alt_target = await run_pipeline_alt_classifier(
-                        audio_path, language,
-                    )
-                    if alt_target is not None:
-                        alt_body, _ = render(alt_target, output)
-                        await run_in_thread(
-                            _try_save_side_file,
-                            alt_body, None,    # no summary file for the alt
-                            video_file_url,
-                            ".he.alt-classifier.srt",
-                        )
-                        log.info(
-                            "[%s] A/B alt-classifier side-file saved",
-                            request_id,
-                        )
-                except Exception:
-                    log.exception(
-                        "[%s] A/B alt-classifier pass failed; primary "
-                        "side-file already written",
-                        request_id,
-                    )
+            # Alt side-file save (outside semaphore — just I/O, no global
+            # mutation). alt_target is only non-None when GENDER_AB_OUTPUT is
+            # on and the alt pass succeeded.
+            if alt_target is not None:
+                alt_body, _ = render(alt_target, output)
+                await run_in_thread(
+                    _try_save_side_file,
+                    alt_body, None,    # no summary file for the alt
+                    video_file_url,
+                    ".he.alt-classifier.srt",
+                )
+                log.info(
+                    "[%s] A/B alt-classifier side-file saved",
+                    request_id,
+                )
 
         log.info("[%s] done in %.1fs (%d segments)",
                  request_id, wall, len(source_segments))

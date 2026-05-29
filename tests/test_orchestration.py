@@ -602,10 +602,13 @@ def test_asr_emits_alt_classifier_srt_when_ab_output_enabled(monkeypatch):
 
     assert response.status_code == 200
     suffixes = [s for s, _ in saved]
-    bodies = {s: b for s, b in saved}
-    assert ".he.srt" in suffixes or any(".he.srt" == s for s in suffixes)
-    assert any(".alt-classifier" in s for s in suffixes), (
-        f"alt-classifier side-file not saved; suffixes: {suffixes}"
+    assert ".he.srt" in suffixes, (
+        f"primary side-file was not saved with the default .he.srt suffix; "
+        f"got: {suffixes}"
+    )
+    assert ".he.alt-classifier.srt" in suffixes, (
+        f"alt-classifier side-file not saved with the expected suffix; "
+        f"got: {suffixes}"
     )
     # Bodies differ between primary and alt.
     alt_body = next(b for s, b in saved if ".alt-classifier" in s)
