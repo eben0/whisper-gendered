@@ -53,21 +53,36 @@ def model_loaded() -> bool:
 
 
 def transcribe(audio_path: Path, language: str | None = "en") -> list[Segment]:
-    """Transcribe an audio file into a list of timed Segments."""
+    """Transcribe an audio file into a list of timed Segments.
+
+    ``word_timestamps=True`` is enabled (Plan Task 5) so we can re-anchor
+    each segment's start/end to its first/last word's timestamps. Whisper's
+    segment-level timestamps drift up to several seconds over long audio
+    (~4s after 4 min observed in S04E05); the word-level timestamps stay
+    tightly aligned because they're produced directly from the model's
+    attention pattern rather than the post-hoc segmentation. When a
+    segment has no word data (rare), we fall back to its native
+    timestamps rather than crash.
+    """
     model = get_model()
     segments_iter, info = model.transcribe(
         str(audio_path),
         language=language,
         beam_size=5,
         vad_filter=True,
-        word_timestamps=False,
+        word_timestamps=True,
     )
-    # The generator runs inference lazily; materialize it into a list here so
-    # the work happens inside the worker thread, not later on the event loop.
-    segments = [
-        Segment(start=s.start, end=s.end, text=s.text.strip())
-        for s in segments_iter
-    ]
+    # Materialize the lazy generator inside the worker thread so the
+    # inference work doesn't leak onto the event loop.
+    segments: list[Segment] = []
+    for s in segments_iter:
+        start = s.start
+        end = s.end
+        words = getattr(s, "words", None)
+        if words:
+            start = words[0].start
+            end = words[-1].end
+        segments.append(Segment(start=start, end=end, text=s.text.strip()))
     log.info(
         "Transcribed %d segments (detected language=%s, prob=%.2f)",
         len(segments), getattr(info, "language", language),
