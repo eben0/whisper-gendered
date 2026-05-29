@@ -107,10 +107,39 @@ def _system_prompt(
             "form (e.g., אתם in Hebrew). Do not mix forms within a single line."
         )
     base += (
+        " If an 'Earlier in this scene:' block is included before the "
+        "numbered translation lines, use it as background context only "
+        "— don't re-translate it. Use it to disambiguate addressee gender "
+        "and number for 'you' forms, maintain vocabulary consistency, "
+        "and pick the form most consistent with what was just said."
+    )
+    base += (
         " Return a JSON object with a 'translations' array containing exactly "
         "one translated string per input line, in the same order."
     )
     return base
+
+
+def _build_user_message(
+    texts: list[str], previous_context: list[str] | None
+) -> str:
+    """Compose the user message body, optionally prefixed by a scene-context block.
+
+    When ``previous_context`` is non-empty, prepends a numbered
+    'Earlier in this scene:' preamble followed by a 'Translate the
+    following lines:' marker, then the numbered ``texts``. When empty or
+    None, returns the bare numbered list — byte-identical to the
+    pre-context behaviour, so existing callers see no change.
+    """
+    parts: list[str] = []
+    if previous_context:
+        parts.append("Earlier in this scene:")
+        for j, ctx in enumerate(previous_context, start=1):
+            parts.append(f"  {j}. {ctx}")
+        parts.append("")
+        parts.append("Translate the following lines:")
+    parts.extend(f"{i + 1}. {t}" for i, t in enumerate(texts))
+    return "\n".join(parts)
 
 
 def _chunks(texts: list[str]) -> list[list[str]]:
@@ -140,8 +169,9 @@ def _translate_one_batch(
     client: anthropic.Anthropic,
     addressee_gender: str | None = None,
     source_language: str = "English",
+    previous_context: list[str] | None = None,
 ) -> list[str]:
-    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
+    numbered = _build_user_message(texts, previous_context)
     response = client.messages.create(
         model=settings.CLAUDE_MODEL,
         max_tokens=MAX_TOKENS,
@@ -172,6 +202,7 @@ def translate_batch(
     client: anthropic.Anthropic,
     addressee_gender: str | None = None,
     source_language: str = "English",
+    previous_context: list[str] | None = None,
 ) -> list[str]:
     """Translate ``texts`` into ``target_language``, returning one string each.
 
@@ -180,7 +211,10 @@ def translate_batch(
     grammatical "you" form for languages where second-person is gender-marked.
     ``source_language`` defaults to English so existing callers stay valid;
     the orchestrator passes the value derived from the request's ``language``
-    query param.
+    query param. ``previous_context`` is an optional list of recent prior
+    translation lines that share scene context — they are prepended to the
+    user message as a background block (not re-translated) so Claude can
+    disambiguate addressee gender/number and keep vocabulary consistent.
     Output length always equals input length.
     """
     if not texts:
@@ -189,7 +223,8 @@ def translate_batch(
     for batch in _chunks(texts):
         out.extend(
             _translate_one_batch(
-                batch, gender, target_language, client, addressee_gender, source_language,
+                batch, gender, target_language, client, addressee_gender,
+                source_language, previous_context=previous_context,
             )
         )
     return out
@@ -202,8 +237,9 @@ async def _translate_one_batch_async(
     client: anthropic.AsyncAnthropic,
     addressee_gender: str | None = None,
     source_language: str = "English",
+    previous_context: list[str] | None = None,
 ) -> list[str]:
-    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
+    numbered = _build_user_message(texts, previous_context)
     response = await client.messages.create(
         model=settings.CLAUDE_MODEL,
         max_tokens=MAX_TOKENS,
@@ -234,6 +270,7 @@ async def translate_batch_async(
     client: anthropic.AsyncAnthropic,
     addressee_gender: str | None = None,
     source_language: str = "English",
+    previous_context: list[str] | None = None,
 ) -> list[str]:
     """Async counterpart of ``translate_batch`` for the chunked orchestrator.
 
@@ -241,7 +278,9 @@ async def translate_batch_async(
     handled by the caller's semaphore. ``addressee_gender`` (optional) hints the
     grammatical "you" form. ``source_language`` defaults to English; the
     orchestrator passes the value derived from the request's ``language``
-    query param. Output length always equals input length.
+    query param. ``previous_context`` (optional) is shared across all
+    sub-batches of this call — the same scene-context window is prepended
+    to each sub-batch's user message. Output length always equals input length.
     """
     if not texts:
         return []
@@ -249,7 +288,8 @@ async def translate_batch_async(
     for batch in _chunks(texts):
         out.extend(
             await _translate_one_batch_async(
-                batch, gender, target_language, client, addressee_gender, source_language,
+                batch, gender, target_language, client, addressee_gender,
+                source_language, previous_context=previous_context,
             )
         )
     return out

@@ -96,15 +96,17 @@ def test_system_prompt_includes_you_form_guidance_even_without_addressee_hint():
 
 
 class _RecordingMessages:
-    """Captures the system prompt of every create() call."""
+    """Captures the system prompt (and full kwargs) of every create() call."""
 
     def __init__(self, payloads):
         self._payloads = payloads
         self.calls = 0
         self.systems: list[str] = []
+        self.payloads: list[dict] = []
 
     async def create(self, **kwargs):
         self.systems.append(kwargs.get("system", ""))
+        self.payloads.append(kwargs)
         text = self._payloads[self.calls]
         self.calls += 1
         return _FakeResponse(text)
@@ -214,3 +216,52 @@ def test_system_prompt_hints_max_chars_per_line():
     import re
     sp = translate._system_prompt("Hebrew", None)
     assert re.search(r"\b(42|45|48|50)\b", sp) or "two lines" in sp.lower()
+
+
+# --- Task 6 (improve-gender-detection): previous-scene context window ------ #
+
+@pytest.mark.asyncio
+async def test_previous_context_appears_in_user_message():
+    """When previous_context is non-empty, the user message must include
+    a numbered 'Earlier in this scene:' block listing those lines.
+    """
+    client = _RecordingAsyncClient([json.dumps({"translations": ["a-he"]})])
+    await translate.translate_batch_async(
+        ["new line"], None, "Hebrew", client,
+        previous_context=["He arrived at noon.", "She was already there."],
+    )
+    user_msg = client.messages.payloads[0]["messages"][0]["content"]
+    assert "Earlier in this scene" in user_msg
+    assert "He arrived at noon" in user_msg
+    assert "She was already there" in user_msg
+    assert "new line" in user_msg
+    # The actual line to translate must be clearly separated from context.
+    # Check that "new line" appears AFTER both context lines.
+    assert user_msg.index("new line") > user_msg.index("She was already there")
+
+
+@pytest.mark.asyncio
+async def test_previous_context_absent_when_window_is_empty():
+    """Default (empty) context should not add any preamble — the user
+    message looks identical to the pre-feature output.
+    """
+    client = _RecordingAsyncClient([json.dumps({"translations": ["a-he"]})])
+    await translate.translate_batch_async(
+        ["only line"], None, "Hebrew", client,
+    )
+    user_msg = client.messages.payloads[0]["messages"][0]["content"]
+    assert "Earlier in this scene" not in user_msg
+
+
+def test_system_prompt_mentions_context_use():
+    """When previous_context is plumbed, the system prompt should tell
+    Claude how to use it. We only check the directive sentence exists —
+    not the exact wording — so future re-phrasings don't break the test.
+    """
+    sp = translate._system_prompt("Hebrew", None)
+    # The directive can be present unconditionally (independent of the
+    # current batch's gender) — it costs nothing when no context lines
+    # are passed.
+    assert (
+        "earlier" in sp.lower() and "context" in sp.lower()
+    ), "system prompt should explain how to use the 'Earlier' context block"
