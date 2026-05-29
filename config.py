@@ -60,6 +60,19 @@ class Settings:
     ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
     CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
     GENDER_THRESHOLD_HZ: float = _env_float("GENDER_THRESHOLD_HZ", 165.0)
+    # Gender classification (Plan: improve-gender-detection).
+    # "pitch"    — current librosa.pyin + threshold (default; no model load)
+    # "ml"       — wav2vec2 audio-classification only
+    # "ensemble" — run both; log disagreements; ML wins (pitch is fallback)
+    GENDER_CLASSIFIER: str = os.getenv("GENDER_CLASSIFIER", "pitch")
+    GENDER_ML_MODEL: str = os.getenv(
+        "GENDER_ML_MODEL",
+        "alefiury/wav2vec2-large-xlsr-53-gender-recognition-librispeech",
+    )
+    # When true, the orchestrator also emits a second *.he.srt next to the
+    # primary one using the *other* classifier (pitch vs ML) so the
+    # operator can A/B them on a real episode.
+    GENDER_AB_OUTPUT: bool = _env_bool("GENDER_AB_OUTPUT", False)
     # Chunked-pipeline tuning.
     CHUNK_DURATION_SEC: int = _env_int("CHUNK_DURATION_SEC", 300)
     TRANSLATE_CONCURRENCY: int = _env_int("TRANSLATE_CONCURRENCY", 3)
@@ -82,6 +95,12 @@ class Settings:
     # HuggingFace seq2seq model. All LOCAL_* keys below are only consulted when
     # TRANSLATION_BACKEND=local.
     TRANSLATION_BACKEND: str = os.getenv("TRANSLATION_BACKEND", "claude")
+    # Translate-context window (Plan: improve-gender-detection).
+    # Number of preceding source-language segments injected into each
+    # translate batch as "earlier in this scene" context. Helps Claude
+    # disambiguate addressee gender and number for "you" forms when the
+    # prior exchange establishes who's being addressed. 0 disables.
+    TRANSLATE_CONTEXT_LINES: int = _env_int("TRANSLATE_CONTEXT_LINES", 4)
     LOCAL_TRANSLATION_MODEL: str = os.getenv(
         "LOCAL_TRANSLATION_MODEL", "facebook/nllb-200-distilled-600M"
     )
