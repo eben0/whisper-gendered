@@ -615,17 +615,20 @@ async def test_translate_context_window_is_passed_to_each_batch(monkeypatch):
 
     await server.run_pipeline_async(server.Path("ignored.wav"), "en")
 
+    # Context window now carries (speaker_gender, target_text) tuples.
+    # Fake_translate returns ``f"HE: {t}"`` so target_text == "HE: line X".
+    # All speakers in this fixture are "male" per the gender stub.
     # Group 1 (A): no prior context.
-    # Group 2 (B): ["line A"].
-    # Group 3 (C): ["line A", "line B"] — window=2 reached.
-    # Group 4 (D): ["line B", "line C"] — rolled.
-    # Group 5 (E): ["line C", "line D"].
+    # Group 2 (B): [("male", "HE: line A")].
+    # Group 3 (C): [..., ("male", "HE: line B")] — window=2 reached.
+    # Group 4 (D): rolled.
+    # Group 5 (E): rolled.
     assert received == [
         [],
-        ["line A"],
-        ["line A", "line B"],
-        ["line B", "line C"],
-        ["line C", "line D"],
+        [("male", "HE: line A")],
+        [("male", "HE: line A"), ("male", "HE: line B")],
+        [("male", "HE: line B"), ("male", "HE: line C")],
+        [("male", "HE: line C"), ("male", "HE: line D")],
     ], received
 
 
@@ -697,8 +700,10 @@ async def test_translate_context_window_threads_through_plain_translate(monkeypa
 
     await server.run_pipeline_async(server.Path("ignored.wav"), "en")
 
-    # Chunk 1 (A): empty context. Chunk 2 (B): ["line A"] from chunk 1.
-    assert received == [[], ["line A"]], received
+    # Chunk 1 (A): empty context.
+    # Chunk 2 (B): one prior tuple — None gender (plain-translate path),
+    # target text from the fake "JA: line A".
+    assert received == [[], [(None, "JA: line A")]], received
 
 
 def test_asr_emits_alt_classifier_srt_when_ab_output_enabled(monkeypatch):

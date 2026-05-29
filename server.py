@@ -412,7 +412,7 @@ async def _translate_chunk(
     sem: asyncio.Semaphore,
     prev_speaker_gender: str | None,
     source_language: str = "English",
-    context_window: list[str] | None = None,
+    context_window: list[tuple[str | None, str]] | None = None,
 ) -> None:
     """Translate one chunk's pre-built speaker groups in place.
 
@@ -452,8 +452,6 @@ async def _translate_chunk(
                     if settings.ADDRESSEE_GENDER_HINT_ENABLED
                     else None
                 )
-                # Capture source text BEFORE mutating seg.text below — otherwise
-                # the rolling window would accumulate target-language strings.
                 source_texts = [s.text for s in group]
                 ctx_snapshot = (
                     list(context_window) if context_window else []
@@ -467,7 +465,15 @@ async def _translate_chunk(
                 for seg, text in zip(group, translated):
                     seg.text = text
                 if context_window is not None:
-                    context_window.extend(source_texts)
+                    # Capture TARGET-language text plus this group's speaker
+                    # gender. Target text is chosen on purpose: gendered
+                    # languages encode the addressee in their verb forms, so
+                    # later batches can reconstruct who was addressing whom —
+                    # source English ``"you"`` reveals nothing about
+                    # addressee gender. See ``pipeline/translate.ContextLine``.
+                    context_window.extend(
+                        (spk_gender, t) for t in translated
+                    )
                     max_n = settings.TRANSLATE_CONTEXT_LINES
                     if max_n <= 0:
                         del context_window[:]
@@ -524,7 +530,7 @@ async def _run_gender_aware(
     # window holds SOURCE text — unlike per-chunk speaker labels, source
     # text has no pyannote-renumbering problem at chunk boundaries.
     # ``None`` disables the feature entirely (TRANSLATE_CONTEXT_LINES=0).
-    context_window: list[str] | None = (
+    context_window: list[tuple[str | None, str]] | None = (
         [] if settings.TRANSLATE_CONTEXT_LINES > 0 else None
     )
     tasks: list[asyncio.Task] = []
@@ -601,14 +607,12 @@ async def _run_plain_translate(
     # Same rolling-window pattern as ``_run_gender_aware`` (Plan Task 7):
     # a single shared list flows across all chunks of the request. Best-effort
     # temporal order when TRANSLATE_CONCURRENCY > 1; deterministic at 1.
-    context_window: list[str] | None = (
+    context_window: list[tuple[str | None, str]] | None = (
         [] if settings.TRANSLATE_CONTEXT_LINES > 0 else None
     )
 
     async def translate_one(chunk):
         async with sem:
-            # Capture source BEFORE mutation so the window doesn't accumulate
-            # target-language text.
             source_texts = [s.text for s in chunk.segments]
             ctx_snapshot = list(context_window) if context_window else []
             translated = await translate.translate_batch_async(
@@ -619,7 +623,10 @@ async def _run_plain_translate(
             for seg, text in zip(chunk.segments, translated):
                 seg.text = text
             if context_window is not None:
-                context_window.extend(source_texts)
+                # Plain-translate has no speaker gender → push (None, text).
+                # See ``_run_gender_aware`` for the rationale on capturing
+                # target-language text rather than source.
+                context_window.extend((None, t) for t in translated)
                 max_n = settings.TRANSLATE_CONTEXT_LINES
                 if max_n <= 0:
                     del context_window[:]

@@ -85,27 +85,54 @@ def _system_prompt(
             parts.append(prompt.load("translate/gender_addressee",
                                      addressee_gender=addressee_gender))
         parts.append(prompt.load("translate/gender_number"))
-    parts.append(prompt.load("translate/scene_context"))
+    parts.append(prompt.load("translate/scene_context",
+                             target_language=target_language))
     parts.append(prompt.load("translate/output_format"))
     return " ".join(parts)
 
 
+ContextLine = tuple[str | None, str]
+"""One line of prior-scene context: ``(speaker_gender, target_text)``.
+
+``speaker_gender`` is ``"male"`` / ``"female"`` for the gender-aware path,
+or ``None`` when the source pipeline doesn't carry gender (plain translate).
+
+``target_text`` is the line in the *target language* (already translated by
+an earlier batch in the same request) — not the source. Target text is
+chosen on purpose: gendered languages (Hebrew, Spanish, Russian, …) encode
+the addressee's gender directly in verb conjugations and pronouns, giving
+Claude the signal it needs to reconstruct turn-taking. Source English
+``"you"`` is gender-neutral and reveals nothing about who was addressing
+whom. The cost is that a mistranslated earlier line propagates its error
+to later lines — but for addressee inference the trade-off pays off.
+"""
+
+
 def _build_user_message(
-    texts: list[str], previous_context: list[str] | None
+    texts: list[str], previous_context: list[ContextLine] | None,
 ) -> str:
     """Compose the user message body, optionally prefixed by a scene-context block.
 
     When ``previous_context`` is non-empty, prepends a numbered
     'Earlier in this scene:' preamble followed by a 'Translate the
-    following lines:' marker, then the numbered ``texts``. When empty or
-    None, returns the bare numbered list — byte-identical to the
-    pre-context behaviour, so existing callers see no change.
+    following lines:' marker, then the numbered ``texts``. Each context
+    line is rendered as ``[gender]: target_text`` — the target-language
+    text already produced for that line, prefixed with the speaker's
+    gender — so Claude can reconstruct turn-taking and infer the current
+    speaker's addressee even when a scene crosses a chunk boundary (where
+    the per-call ``addressee_gender`` hint is None). When
+    ``speaker_gender`` is None on a context line, the bracket is omitted.
+
+    When ``previous_context`` is empty or None, returns the bare numbered
+    list — byte-identical to the pre-context behaviour, so existing
+    callers see no change.
     """
     parts: list[str] = []
     if previous_context:
         parts.append("Earlier in this scene:")
-        for j, ctx in enumerate(previous_context, start=1):
-            parts.append(f"  {j}. {ctx}")
+        for j, (gender, ctx) in enumerate(previous_context, start=1):
+            prefix = f"[{gender}]: " if gender else ""
+            parts.append(f"  {j}. {prefix}{ctx}")
         parts.append("")
         parts.append("Translate the following lines:")
     parts.extend(f"{i + 1}. {t}" for i, t in enumerate(texts))
@@ -139,7 +166,7 @@ def _translate_one_batch(
     client: anthropic.Anthropic,
     addressee_gender: str | None = None,
     source_language: str = "English",
-    previous_context: list[str] | None = None,
+    previous_context: list[ContextLine] | None = None,
 ) -> list[str]:
     numbered = _build_user_message(texts, previous_context)
     response = client.messages.create(
@@ -172,7 +199,7 @@ def translate_batch(
     client: anthropic.Anthropic,
     addressee_gender: str | None = None,
     source_language: str = "English",
-    previous_context: list[str] | None = None,
+    previous_context: list[ContextLine] | None = None,
 ) -> list[str]:
     """Translate ``texts`` into ``target_language``, returning one string each.
 
@@ -207,7 +234,7 @@ async def _translate_one_batch_async(
     client: anthropic.AsyncAnthropic,
     addressee_gender: str | None = None,
     source_language: str = "English",
-    previous_context: list[str] | None = None,
+    previous_context: list[ContextLine] | None = None,
 ) -> list[str]:
     numbered = _build_user_message(texts, previous_context)
     response = await client.messages.create(
@@ -240,7 +267,7 @@ async def translate_batch_async(
     client: anthropic.AsyncAnthropic,
     addressee_gender: str | None = None,
     source_language: str = "English",
-    previous_context: list[str] | None = None,
+    previous_context: list[ContextLine] | None = None,
 ) -> list[str]:
     """Async counterpart of ``translate_batch`` for the chunked orchestrator.
 

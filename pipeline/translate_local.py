@@ -292,7 +292,7 @@ async def translate_batch_async(
     client: Any = None,  # ignored — kept for signature parity with the Claude backend
     addressee_gender: str | None = None,  # ignored by this backend (see module docstring)
     source_language: str = "English",
-    previous_context: list[str] | None = None,  # ignored — see module docstring
+    previous_context: list[tuple[str | None, str]] | None = None,  # ignored — see module docstring
 ) -> list[str]:
     """Translate ``texts`` into ``target_language``, returning one string each.
 

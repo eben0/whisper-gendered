@@ -263,21 +263,43 @@ def test_system_prompt_hints_max_chars_per_line():
 @pytest.mark.asyncio
 async def test_previous_context_appears_in_user_message():
     """When previous_context is non-empty, the user message must include
-    a numbered 'Earlier in this scene:' block listing those lines.
+    a numbered 'Earlier in this scene:' block with each line prefixed by
+    the speaker's gender label so Claude can reconstruct turn-taking.
     """
     client = _RecordingAsyncClient([json.dumps({"translations": ["a-he"]})])
     await translate.translate_batch_async(
         ["new line"], None, "Hebrew", client,
-        previous_context=["He arrived at noon.", "She was already there."],
+        previous_context=[
+            ("male", "הוא הגיע בצהריים."),
+            ("female", "היא כבר הייתה שם."),
+        ],
     )
     user_msg = client.messages.payloads[0]["messages"][0]["content"]
     assert "Earlier in this scene" in user_msg
-    assert "He arrived at noon" in user_msg
-    assert "She was already there" in user_msg
+    assert "[male]: הוא הגיע בצהריים." in user_msg
+    assert "[female]: היא כבר הייתה שם." in user_msg
     assert "new line" in user_msg
     # The actual line to translate must be clearly separated from context.
-    # Check that "new line" appears AFTER both context lines.
-    assert user_msg.index("new line") > user_msg.index("She was already there")
+    assert user_msg.index("new line") > user_msg.index("היא כבר הייתה שם.")
+
+
+@pytest.mark.asyncio
+async def test_previous_context_renders_without_prefix_when_gender_unknown():
+    """Plain-translate path passes None for speaker gender. Those lines
+    should render without the ``[gender]: `` prefix so the prompt doesn't
+    lie about information it doesn't have.
+    """
+    client = _RecordingAsyncClient([json.dumps({"translations": ["a-ja"]})])
+    await translate.translate_batch_async(
+        ["next line"], None, "Japanese", client,
+        previous_context=[(None, "earlier-line-1"), (None, "earlier-line-2")],
+    )
+    user_msg = client.messages.payloads[0]["messages"][0]["content"]
+    assert "earlier-line-1" in user_msg
+    assert "earlier-line-2" in user_msg
+    # No [male]: / [female]: prefixes because gender wasn't carried.
+    assert "[male]" not in user_msg
+    assert "[female]" not in user_msg
 
 
 @pytest.mark.asyncio
