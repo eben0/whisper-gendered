@@ -18,6 +18,7 @@ import logging
 
 import anthropic
 
+import prompt
 from config import settings
 
 log = logging.getLogger("pipeline.translate")
@@ -50,74 +51,28 @@ def _system_prompt(
     addressee_gender: str | None = None,
     source_language: str = "English",
 ) -> str:
-    base = (
-        f"You are an expert subtitle translator. Translate each numbered line "
-        f"from {source_language} into {target_language}. Produce natural, idiomatic, "
-        f"concise {target_language} suitable for on-screen subtitles. Preserve "
-        f"meaning and tone; do not add notes or explanations."
-    )
-    # Style guidance — applies to every translation regardless of gender.
-    base += (
-        f" Transliterate proper nouns (people's names, place names, brand "
-        f"names, nicknames) into the {target_language} script: write them as "
-        f"the audience would naturally read them aloud, not as Latin letters. "
-        f"Example: 'Mondo' -> 'מונדו', 'T' -> 'טי'."
-    )
-    base += (
-        f" Render slang, idioms, and figures of speech with their natural "
-        f"{target_language} equivalents — not literal word-for-word calques. "
-        f"If a {source_language} idiom has no clean equivalent, prefer the "
-        f"closest colloquial phrasing in {target_language}."
-    )
-    base += (
-        f" Choose the natural {target_language} preposition for each "
-        f"construction. For Hebrew specifically: prefer ב, של, ל, מ, על "
-        f"where the grammar calls for them; reserve את only for marking a "
-        f"definite direct object — never use את as a generic substitute."
-    )
-    base += (
-        " Keep each line short — aim for at most 42 characters per visible "
-        "line. For longer utterances, prefer two short lines over one long "
-        "one; end thoughts on natural pause-points (after a comma, "
-        "conjunction, or clause boundary) when possible, so a downstream "
-        "formatter can break cleanly."
-    )
+    """Assemble the system prompt from templates in ``prompt/translate/``."""
+    parts: list[str] = [
+        prompt.load("translate/base",
+                    source_language=source_language, target_language=target_language),
+        prompt.load("translate/style_transliteration", target_language=target_language),
+        prompt.load("translate/style_slang",
+                    source_language=source_language, target_language=target_language),
+        prompt.load("translate/style_prepositions", target_language=target_language),
+        prompt.load("translate/style_length"),
+    ]
     if gender is not None:
-        base += (
-            f" The speaker of these lines is {gender}. Use grammatically correct "
-            f"{gender} forms throughout — verb conjugation, adjective and "
-            f"participle agreement, imperatives, and pronouns must all match a "
-            f"{gender} speaker referring to themselves."
-        )
-        base += (
-            f" When the speaker addresses another person ({source_language} \"you\""
-            f" or its equivalent), choose the {target_language} form matching the "
-            f"addressee's number and gender."
-        )
+        parts.append(prompt.load("translate/gender_speaker", gender=gender))
+        parts.append(prompt.load("translate/gender_you_form",
+                                 source_language=source_language,
+                                 target_language=target_language))
         if addressee_gender is not None:
-            base += (
-                f" The most likely addressee in this exchange is "
-                f"{addressee_gender}; prefer that form for singular \"you\" "
-                f"unless context clearly implies a different addressee."
-            )
-        base += (
-            " Infer number from context — collective cues like \"you all\", "
-            "\"you guys\", or plural verbs imply plural. When number is "
-            "ambiguous in a multi-person scene, prefer the inclusive plural "
-            "form (e.g., אתם in Hebrew). Do not mix forms within a single line."
-        )
-    base += (
-        " If an 'Earlier in this scene:' block is included before the "
-        "numbered translation lines, use it as background context only "
-        "— don't re-translate it. Use it to disambiguate addressee gender "
-        "and number for 'you' forms, maintain vocabulary consistency, "
-        "and pick the form most consistent with what was just said."
-    )
-    base += (
-        " Return a JSON object with a 'translations' array containing exactly "
-        "one translated string per input line, in the same order."
-    )
-    return base
+            parts.append(prompt.load("translate/gender_addressee",
+                                     addressee_gender=addressee_gender))
+        parts.append(prompt.load("translate/gender_number"))
+    parts.append(prompt.load("translate/scene_context"))
+    parts.append(prompt.load("translate/output_format"))
+    return " ".join(parts)
 
 
 def _build_user_message(

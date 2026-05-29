@@ -32,12 +32,14 @@ _lock = threading.Lock()
 
 
 class _Wav2Vec2GenderPipeline:
-    """HF-pipeline-shaped callable around a wav2vec2 audio classifier.
+    """Module-private: external callers use ``classify_audio()`` instead.
 
-    ``__call__(payload, top_k=None)`` accepts the same payload as HF's
-    ``"audio-classification"`` pipeline — ``{"array": np.ndarray,
-    "sampling_rate": int}`` — and returns ``[{"label": str, "score": float},
-    ...]`` sorted by descending score.
+    Leading underscore is the Python convention for "not part of the public
+    API"; this class exists only to give ``get_pipeline()`` a typed handle for
+    the singleton. ``__call__(payload, top_k=None)`` accepts HF's
+    audio-classification payload — ``{"array": np.ndarray, "sampling_rate":
+    int}`` — and returns ``[{"label": str, "score": float}, ...]`` sorted by
+    descending score.
     """
 
     def __init__(self, model: Any, feature_extractor: Any, device: str):

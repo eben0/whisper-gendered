@@ -1,0 +1,1 @@
+If an 'Earlier in this scene:' block is included before the numbered translation lines, use it as background context only — don't re-translate it. Use it to disambiguate addressee gender and number for 'you' forms, maintain vocabulary consistency, and pick the form most consistent with what was just said.

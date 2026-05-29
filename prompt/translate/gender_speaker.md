@@ -1,0 +1,1 @@
+The speaker of these lines is {gender}. Use grammatically correct {gender} forms throughout — verb conjugation, adjective and participle agreement, imperatives, and pronouns must all match a {gender} speaker referring to themselves.
