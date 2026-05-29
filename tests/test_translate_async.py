@@ -209,6 +209,46 @@ def test_system_prompt_prefers_natural_prepositions_for_hebrew():
     assert "preposition" in sp.lower() or "את" in sp
 
 
+# --- Language-specific prompt gating (PR #1 review feedback) -------------- #
+
+def test_system_prompt_skips_transliteration_for_latin_script_target():
+    """Transliteration guidance is meaningless when the target uses Latin
+    letters (French, Spanish, German, etc.) — proper nouns stay as-is.
+    The block must NOT appear in the system prompt for such targets.
+    """
+    for target in ("French", "Spanish", "German", "Italian", "Portuguese"):
+        sp = translate._system_prompt(target, None)
+        assert "transliterat" not in sp.lower(), (
+            f"transliteration guidance leaked into {target} prompt: {sp[:200]}"
+        )
+
+
+def test_system_prompt_keeps_transliteration_for_non_latin_targets():
+    """Non-Latin-script targets (Hebrew, Arabic, Russian, etc.) must still
+    receive transliteration guidance — proper nouns need to be re-spelled
+    in the target script.
+    """
+    for target in ("Hebrew", "Arabic", "Russian", "Hindi", "Japanese"):
+        sp = translate._system_prompt(target, None)
+        assert "transliterat" in sp.lower(), (
+            f"transliteration guidance missing for {target}: {sp[:200]}"
+        )
+
+
+def test_system_prompt_skips_hebrew_preposition_block_for_non_hebrew():
+    """The Hebrew-specific preposition rule (about ב, של, ל, מ, על, את)
+    must NOT appear when the target is anything other than Hebrew.
+    """
+    for target in ("Arabic", "Spanish", "French", "Russian", "German"):
+        sp = translate._system_prompt(target, None)
+        assert "את" not in sp, (
+            f"Hebrew-specific preposition block leaked into {target} prompt"
+        )
+        assert "ב, של" not in sp, (
+            f"Hebrew preposition list leaked into {target} prompt"
+        )
+
+
 def test_system_prompt_hints_max_chars_per_line():
     """The downstream formatter (Task 2) will split long lines, but the
     prompt should still steer Claude toward short subtitle-friendly output.

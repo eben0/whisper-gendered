@@ -20,6 +20,7 @@ import anthropic
 
 import prompt
 from config import settings
+from pipeline.lang import uses_non_latin_script
 
 log = logging.getLogger("pipeline.translate")
 
@@ -51,16 +52,30 @@ def _system_prompt(
     addressee_gender: str | None = None,
     source_language: str = "English",
 ) -> str:
-    """Assemble the system prompt from templates in ``prompt/translate/``."""
+    """Assemble the system prompt from templates in ``prompt/translate/``.
+
+    Language-specific sections are only included when relevant:
+    - transliteration guidance is skipped for Latin-script targets
+      (French, Spanish, German, etc.) where proper nouns stay as-is.
+    - Hebrew-specific preposition guidance is only included when the
+      target is Hebrew.
+    """
     parts: list[str] = [
         prompt.load("translate/base",
                     source_language=source_language, target_language=target_language),
-        prompt.load("translate/style_transliteration", target_language=target_language),
-        prompt.load("translate/style_slang",
-                    source_language=source_language, target_language=target_language),
-        prompt.load("translate/style_prepositions", target_language=target_language),
-        prompt.load("translate/style_length"),
     ]
+    if uses_non_latin_script(target_language):
+        parts.append(prompt.load("translate/style_transliteration",
+                                 target_language=target_language))
+    parts.append(prompt.load("translate/style_slang",
+                             source_language=source_language,
+                             target_language=target_language))
+    parts.append(prompt.load("translate/style_prepositions",
+                             source_language=source_language,
+                             target_language=target_language))
+    if target_language == "Hebrew":
+        parts.append(prompt.load("translate/style_prepositions_hebrew"))
+    parts.append(prompt.load("translate/style_length"))
     if gender is not None:
         parts.append(prompt.load("translate/gender_speaker", gender=gender))
         parts.append(prompt.load("translate/gender_you_form",
