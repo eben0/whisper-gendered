@@ -555,3 +555,58 @@ def test_asr_skips_side_file_when_target_is_none(monkeypatch):
     assert response.status_code == 200
     assert "just english" in response.text
     assert save_called["hit"] is False
+
+
+def test_asr_emits_alt_classifier_srt_when_ab_output_enabled(monkeypatch):
+    """When GENDER_AB_OUTPUT=true, the /asr handler must call
+    _try_save_side_file a SECOND time with a different filename
+    (``*.he.alt-classifier.srt``) using the alternate classifier's
+    output.
+    """
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Hebrew")
+    monkeypatch.setattr(server.settings, "GENDER_AB_OUTPUT", True)
+    monkeypatch.setattr(server.settings, "GENDER_CLASSIFIER", "pitch")
+
+    source_segs = [Segment(start=0.0, end=1.0, text="hello")]
+    target_segs = [Segment(start=0.0, end=1.0, text="שלום")]
+    alt_target  = [Segment(start=0.0, end=1.0, text="שלום-ALT")]
+
+    async def fake_pipeline(audio_path, language):
+        return source_segs, target_segs
+    monkeypatch.setattr(server, "run_pipeline_async", fake_pipeline)
+
+    async def fake_alt(audio_path, language):
+        return source_segs, alt_target
+    monkeypatch.setattr(server, "run_pipeline_alt_classifier", fake_alt)
+
+    monkeypatch.setattr(server, "encode_to_wav", lambda src, dst: None)
+    monkeypatch.setattr(server, "prepare_unencoded", lambda src, dst: None)
+
+    saved: list[tuple[str, str]] = []  # (suffix, body)
+    def fake_save(body, summary, video_file_url, suffix=None):
+        saved.append((suffix or ".he.srt", body))
+    monkeypatch.setattr(server, "_try_save_side_file", fake_save)
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/asr",
+        params={
+            "task": "transcribe", "language": "en",
+            "output": "srt", "encode": "false",
+            "video_file": "/media/tv/x.mp4",
+        },
+        files={"audio_file": ("x.wav", b"RIFF0000WAVE", "audio/wav")},
+    )
+
+    assert response.status_code == 200
+    suffixes = [s for s, _ in saved]
+    bodies = {s: b for s, b in saved}
+    assert ".he.srt" in suffixes or any(".he.srt" == s for s in suffixes)
+    assert any(".alt-classifier" in s for s in suffixes), (
+        f"alt-classifier side-file not saved; suffixes: {suffixes}"
+    )
+    # Bodies differ between primary and alt.
+    alt_body = next(b for s, b in saved if ".alt-classifier" in s)
+    assert "שלום-ALT" in alt_body

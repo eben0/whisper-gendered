@@ -228,9 +228,14 @@ def _try_save_side_file(
     body: str,
     summary: str | None,
     video_file_url: str,
+    suffix: str | None = None,
 ) -> None:
     """Write the SRT body — and optionally a sibling summary file — to the
     translated path next to the source video.
+
+    ``suffix`` overrides ``settings.SAVE_SRT_SUFFIX`` when set. Used by Plan
+    Task 5 to emit a parallel alt-classifier SRT (``*.he.alt-classifier.srt``)
+    for A/B comparison.
 
     Failures (missing share, permission denied, malformed URL) log a warning
     and do not affect the HTTP response. Atomic-ish: write to ``<target>.tmp``
@@ -239,12 +244,13 @@ def _try_save_side_file(
     ``_compute_summary_path`` so e.g. ``Show.S01E01.he.srt`` pairs with
     ``Show.S01E01.he.summary.txt``.
     """
+    effective_suffix = suffix or settings.SAVE_SRT_SUFFIX
     try:
         target = _compute_side_file_path(
             video_file_url,
             settings.SAVE_SRT_VIDEO_PREFIX,
             settings.SAVE_SRT_LOCAL_PREFIX,
-            settings.SAVE_SRT_SUFFIX,
+            effective_suffix,
         )
         if target is None:
             return
@@ -614,6 +620,30 @@ async def run_pipeline_async(
     return source_segments, target_segments
 
 
+async def run_pipeline_alt_classifier(
+    audio_path: Path, language: str,
+) -> tuple[list[Segment], list[Segment] | None]:
+    """Same as ``run_pipeline_async`` but flips ``GENDER_CLASSIFIER`` to
+    the alternate of whatever's currently configured, runs the pipeline,
+    and restores the original value.
+
+    Cost: one extra full pipeline pass per request. Only invoked when
+    ``GENDER_AB_OUTPUT=true``; defaults are off.
+    """
+    primary = settings.GENDER_CLASSIFIER.strip().lower()
+    alt = {
+        "pitch": "ml",
+        "ml": "pitch",
+        "ensemble": "pitch",   # alt of ensemble is pitch-only for clarity
+    }.get(primary, "ml")
+    old = settings.GENDER_CLASSIFIER
+    try:
+        settings.GENDER_CLASSIFIER = alt
+        return await run_pipeline_async(audio_path, language)
+    finally:
+        settings.GENDER_CLASSIFIER = old
+
+
 # --------------------------------------------------------------------------- #
 # Lifecycle
 # --------------------------------------------------------------------------- #
@@ -746,6 +776,30 @@ async def asr(
             await run_in_thread(
                 _try_save_side_file, target_body, summary, video_file_url,
             )
+
+            if settings.GENDER_AB_OUTPUT:
+                try:
+                    alt_source, alt_target = await run_pipeline_alt_classifier(
+                        audio_path, language,
+                    )
+                    if alt_target is not None:
+                        alt_body, _ = render(alt_target, output)
+                        await run_in_thread(
+                            _try_save_side_file,
+                            alt_body, None,    # no summary file for the alt
+                            video_file_url,
+                            ".he.alt-classifier.srt",
+                        )
+                        log.info(
+                            "[%s] A/B alt-classifier side-file saved",
+                            request_id,
+                        )
+                except Exception:
+                    log.exception(
+                        "[%s] A/B alt-classifier pass failed; primary "
+                        "side-file already written",
+                        request_id,
+                    )
 
         log.info("[%s] done in %.1fs (%d segments)",
                  request_id, wall, len(source_segments))
