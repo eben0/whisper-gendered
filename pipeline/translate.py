@@ -54,7 +54,33 @@ def _system_prompt(
         f"You are an expert subtitle translator. Translate each numbered line "
         f"from {source_language} into {target_language}. Produce natural, idiomatic, "
         f"concise {target_language} suitable for on-screen subtitles. Preserve "
-        f"meaning and tone; do not add notes, explanations, or transliteration."
+        f"meaning and tone; do not add notes or explanations."
+    )
+    # Style guidance — applies to every translation regardless of gender.
+    base += (
+        f" Transliterate proper nouns (people's names, place names, brand "
+        f"names, nicknames) into the {target_language} script: write them as "
+        f"the audience would naturally read them aloud, not as Latin letters. "
+        f"Example: 'Mondo' -> 'מונדו', 'T' -> 'טי'."
+    )
+    base += (
+        f" Render slang, idioms, and figures of speech with their natural "
+        f"{target_language} equivalents — not literal word-for-word calques. "
+        f"If a {source_language} idiom has no clean equivalent, prefer the "
+        f"closest colloquial phrasing in {target_language}."
+    )
+    base += (
+        f" Choose the natural {target_language} preposition for each "
+        f"construction. For Hebrew specifically: prefer ב, של, ל, מ, על "
+        f"where the grammar calls for them; reserve את only for marking a "
+        f"definite direct object — never use את as a generic substitute."
+    )
+    base += (
+        " Keep each line short — aim for at most 42 characters per visible "
+        "line. For longer utterances, prefer two short lines over one long "
+        "one; end thoughts on natural pause-points (after a comma, "
+        "conjunction, or clause boundary) when possible, so a downstream "
+        "formatter can break cleanly."
     )
     if gender is not None:
         base += (

@@ -159,3 +159,58 @@ def test_system_prompt_source_language_default_and_override():
     )
     assert "from Spanish into Hebrew" in overridden
     assert "from English" not in overridden
+
+
+# --- Task 1 (subtitle-quality-improvements plan): prompt contract -------- #
+
+def test_system_prompt_asks_for_transliterated_names():
+    """User reported: 'T' / 'Mondo' (S04E05 @ 05:25) left as Latin in the
+    Hebrew SRT. The old prompt explicitly banned transliteration; the new
+    one must require it for proper nouns.
+    """
+    sp = translate._system_prompt("Hebrew", None)
+    assert "transliterat" in sp.lower()
+    # Must not still flatly forbid transliteration anywhere.
+    forbidding = [
+        line for line in sp.split(".")
+        if "do not" in line.lower() and "transliterat" in line.lower()
+    ]
+    assert forbidding == [], f"prompt still forbids transliteration: {forbidding}"
+
+
+def test_system_prompt_asks_for_idiomatic_slang():
+    """User reported: slang translated literally rather than idiomatically.
+
+    The pre-existing prompt already says ``"natural, idiomatic, concise"``
+    in a general styling sentence, which isn't enough — we need explicit
+    slang/idiom guidance directed at how to render them.
+    """
+    sp = translate._system_prompt("Hebrew", None).lower()
+    # Require both 'slang' AND (idiom* OR equivalent*) — meaning a
+    # dedicated sentence about rendering slang/idioms as their target-
+    # language equivalents, not just the generic "idiomatic" descriptor.
+    assert "slang" in sp, "prompt must explicitly mention 'slang'"
+    assert "idiom" in sp or "equivalent" in sp, (
+        "prompt must instruct rendering idioms/equivalents, not "
+        "just descibe the output as 'idiomatic'"
+    )
+
+
+def test_system_prompt_prefers_natural_prepositions_for_hebrew():
+    """User reported: at 05:06, ``את`` used where ``ב`` or ``של`` would be
+    natural. The prompt should explicitly guide preposition choice.
+    """
+    sp = translate._system_prompt("Hebrew", None)
+    # Hebrew-specific guidance must mention the natural-preposition rule.
+    # Either the word "preposition" or the Hebrew את token is acceptable
+    # to keep the test stable against minor re-wordings.
+    assert "preposition" in sp.lower() or "את" in sp
+
+
+def test_system_prompt_hints_max_chars_per_line():
+    """The downstream formatter (Task 2) will split long lines, but the
+    prompt should still steer Claude toward short subtitle-friendly output.
+    """
+    import re
+    sp = translate._system_prompt("Hebrew", None)
+    assert re.search(r"\b(42|45|48|50)\b", sp) or "two lines" in sp.lower()
