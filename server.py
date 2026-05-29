@@ -451,7 +451,6 @@ async def _run_gender_aware(
     chunks = make_chunks(segments, settings.CHUNK_DURATION_SEC)
     sem = asyncio.Semaphore(settings.TRANSLATE_CONCURRENCY)
     tasks: list[asyncio.Task] = []
-    prev_speaker_gender: str | None = None
     t1 = time.monotonic()
     try:
         for idx, chunk in enumerate(chunks):
@@ -462,9 +461,7 @@ async def _run_gender_aware(
                 "chunk %d/%d diarize+gender done (%d speakers)",
                 idx + 1, len(chunks), len(genders),
             )
-            # Build chunk-local assignment + groups here so we know the chunk's
-            # last group's speaker gender (for the next chunk's addressee carry)
-            # before launching the translate task.
+            # Build chunk-local assignment + groups.
             assigned: list[tuple[Segment, str | None]] = []
             for seg in chunk.segments:
                 local = Segment(seg.start - chunk.start, seg.end - chunk.start, seg.text)
@@ -472,17 +469,18 @@ async def _run_gender_aware(
             groups = _group_consecutive(assigned)
             tasks.append(asyncio.create_task(
                 _translate_chunk(
+                    # ``prev_speaker_gender`` is intentionally hard-coded
+                    # to None here (Plan Task 7). pyannote re-numbers
+                    # speakers per chunk, so the previous chunk's last
+                    # speaker label cannot be reliably matched against
+                    # the next chunk's first speaker label — carrying
+                    # the gender across the boundary was wrong as often
+                    # as it was right. Within-chunk rotation in
+                    # ``_translate_chunk`` is unaffected.
                     idx, groups, genders, target, client, sem,
-                    prev_speaker_gender, source_language,
+                    None, source_language,
                 )
             ))
-            # Carry: the next chunk's first group's addressee is this chunk's
-            # final group's speaker gender.
-            if groups:
-                last_speaker = groups[-1][0]
-                prev_speaker_gender = (
-                    genders.get(last_speaker, "male") if last_speaker else "male"
-                )
         await asyncio.gather(*tasks)
     except BaseException:
         for t in tasks:
@@ -542,7 +540,15 @@ async def run_pipeline_async(
     """
     t0 = time.monotonic()
     segments = await run_in_thread(transcribe.transcribe, audio_path, language)
-    log.info("transcribe: %d segments in %.1fs", len(segments), time.monotonic() - t0)
+    transcribe_elapsed = time.monotonic() - t0
+    # Two log lines: the historical timing line, then an explicit-count
+    # line worded for grep ("transcribed N segments"). The count line
+    # pairs with the post-translate counter below so a missing-segment
+    # investigation can simply diff the two numbers.
+    log.info("transcribe: %d segments in %.1fs",
+             len(segments), transcribe_elapsed)
+    log.info("transcribed %d segments from audio (input count for translate)",
+             len(segments))
 
     if not settings.translation_enabled() or not segments:
         return segments, None
@@ -576,10 +582,31 @@ async def run_pipeline_async(
             segments, target, client, source_language,
         )
 
+    # Pipeline metrics — pair with the post-transcribe count above.
+    # A mismatch means something between transcribe and translate dropped
+    # segments (Claude returning a shorter JSON array than asked, chunking
+    # losing a segment at a boundary, etc.). Surface it at ERROR so an
+    # operator notices without grepping; the per-line counts are at INFO
+    # for the happy path.
+    diff = len(segments) - len(target_segments)
+    log.info("translated %d segments (input was %d; difference = %d)",
+             len(target_segments), len(segments), diff)
+    if diff != 0:
+        log.error(
+            "segment count mismatch — pipeline lost %d segments between "
+            "transcribe and translate (input=%d, output=%d). Translation "
+            "JSON length mismatch or chunk-boundary drop likely; check "
+            "_translate_chunk in server.py and the alignment fallback in "
+            "pipeline/translate.py.",
+            diff, len(segments), len(target_segments),
+        )
+
     # Pair the snapshotted source text with the (now-translated) instants so
     # both lists share start/end stamps but carry different ``.text``. New
     # Segment instances guarantee independence: a later mutation to one list
-    # cannot leak into the other.
+    # cannot leak into the other. ``zip`` truncates to the shorter list,
+    # so a mismatch (already flagged above) results in a shorter source
+    # list rather than a hard error.
     source_segments = [
         Segment(t.start, t.end, src)
         for t, src in zip(target_segments, source_texts)
