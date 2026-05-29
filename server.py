@@ -451,7 +451,6 @@ async def _run_gender_aware(
     chunks = make_chunks(segments, settings.CHUNK_DURATION_SEC)
     sem = asyncio.Semaphore(settings.TRANSLATE_CONCURRENCY)
     tasks: list[asyncio.Task] = []
-    prev_speaker_gender: str | None = None
     t1 = time.monotonic()
     try:
         for idx, chunk in enumerate(chunks):
@@ -462,9 +461,7 @@ async def _run_gender_aware(
                 "chunk %d/%d diarize+gender done (%d speakers)",
                 idx + 1, len(chunks), len(genders),
             )
-            # Build chunk-local assignment + groups here so we know the chunk's
-            # last group's speaker gender (for the next chunk's addressee carry)
-            # before launching the translate task.
+            # Build chunk-local assignment + groups.
             assigned: list[tuple[Segment, str | None]] = []
             for seg in chunk.segments:
                 local = Segment(seg.start - chunk.start, seg.end - chunk.start, seg.text)
@@ -472,17 +469,18 @@ async def _run_gender_aware(
             groups = _group_consecutive(assigned)
             tasks.append(asyncio.create_task(
                 _translate_chunk(
+                    # ``prev_speaker_gender`` is intentionally hard-coded
+                    # to None here (Plan Task 7). pyannote re-numbers
+                    # speakers per chunk, so the previous chunk's last
+                    # speaker label cannot be reliably matched against
+                    # the next chunk's first speaker label — carrying
+                    # the gender across the boundary was wrong as often
+                    # as it was right. Within-chunk rotation in
+                    # ``_translate_chunk`` is unaffected.
                     idx, groups, genders, target, client, sem,
-                    prev_speaker_gender, source_language,
+                    None, source_language,
                 )
             ))
-            # Carry: the next chunk's first group's addressee is this chunk's
-            # final group's speaker gender.
-            if groups:
-                last_speaker = groups[-1][0]
-                prev_speaker_gender = (
-                    genders.get(last_speaker, "male") if last_speaker else "male"
-                )
         await asyncio.gather(*tasks)
     except BaseException:
         for t in tasks:

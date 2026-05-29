@@ -147,6 +147,12 @@ async def test_addressee_rotates_within_chunk(monkeypatch):
     assert [s.text for s in target] == ["a|male|None", "b|female|male", "c|male|female"]
 
 
+@pytest.mark.skip(reason=(
+    "Cross-chunk addressee carry removed in Plan Task 7 — pyannote re-numbers "
+    "speakers per chunk so the previous chunk's last speaker gender is not "
+    "necessarily the same person opening the next chunk. See the new test "
+    "test_addressee_does_not_carry_across_chunks for the current contract."
+))
 @pytest.mark.asyncio
 async def test_addressee_carries_across_chunks(monkeypatch):
     # Two chunks. Each chunk has one segment / one speaker. Chunk 1 = female,
@@ -187,6 +193,58 @@ async def test_addressee_carries_across_chunks(monkeypatch):
     text_by_seg = {s.text.split("|")[0]: s.text for s in target}
     assert text_by_seg["a"] == "a|female|None"
     assert text_by_seg["b"] == "b|male|female"
+
+
+@pytest.mark.asyncio
+async def test_addressee_does_not_carry_across_chunks(monkeypatch):
+    """Plan Task 7. pyannote re-numbers speakers per chunk, so the previous
+    chunk's last speaker gender can't be trusted as the addressee for the
+    first group of the next chunk. With cross-chunk carry removed, both
+    chunks' first group must see ``addressee_gender=None``.
+    """
+    segs = [
+        Segment(start=0.0, end=6.0, text="a"),
+        Segment(start=6.0, end=12.0, text="b"),
+    ]
+    monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Hebrew")
+    monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 5)
+    monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
+    monkeypatch.setattr(server.settings, "ADDRESSEE_GENDER_HINT_ENABLED", True)
+    monkeypatch.setattr(server.transcribe, "transcribe",
+                        lambda path, language="en": list(segs))
+    monkeypatch.setattr(server, "_load_wav_mono",
+                        lambda path: (np.zeros(16000 * 12, dtype=np.float32), 16000))
+    monkeypatch.setattr(server, "get_async_anthropic_client", lambda: object())
+
+    def fake_diarize(waveform, sr):
+        ann = Annotation()
+        ann[PSegment(0.0, 6.0)] = "S"
+        return ann
+    monkeypatch.setattr(server.diarize, "diarize_waveform", fake_diarize)
+
+    chunk_idx = {"i": 0}
+    def fake_detect(audio, sr, ann):
+        # Chunk 0 = female, chunk 1 = male; the OLD behavior would have
+        # carried "female" into chunk 1's first group.
+        result = {"S": "female" if chunk_idx["i"] == 0 else "male"}
+        chunk_idx["i"] += 1
+        return result
+    monkeypatch.setattr(server.gender, "detect_genders", fake_detect)
+
+    addressees: list[str | None] = []
+    async def fake_translate(texts, gender, target, client,
+                             addressee_gender=None, source_language="English"):
+        addressees.append(addressee_gender)
+        return [f"{t}|{gender}|{addressee_gender}" for t in texts]
+    monkeypatch.setattr(server.translate, "translate_batch_async",
+                        fake_translate)
+
+    await server.run_pipeline_async(server.Path("ignored.wav"), "en")
+
+    # Two chunks, one group each — both first-of-chunk, so addressee None.
+    assert addressees == [None, None], (
+        f"cross-chunk addressee carry should be removed; got {addressees}"
+    )
 
 
 @pytest.mark.asyncio
