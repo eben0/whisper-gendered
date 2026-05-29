@@ -15,6 +15,7 @@ import librosa
 import numpy as np
 from pyannote.core import Annotation
 
+import config
 from config import settings
 
 log = logging.getLogger("pipeline.gender")
@@ -58,6 +59,78 @@ def _classify_f0(f0: np.ndarray) -> str:
     return "female" if median > GENDER_THRESHOLD_HZ else "male"
 
 
+def _classify_speaker(
+    signal: np.ndarray,
+    sr: int,
+    speaker_label: str,
+    voiced_f0: np.ndarray,
+) -> str:
+    """Return "male" | "female" using the configured classifier.
+
+    ``voiced_f0`` is the librosa.pyin output for the pitch classifier;
+    ``signal`` is the raw concatenated audio for the ML classifier. Both
+    are computed once by ``detect_genders`` so the dispatcher just chooses
+    among them.
+    """
+    # Read through ``config.settings`` (not the import-time-bound ``settings``
+    # alias) so tests that reload ``config`` — and any future runtime
+    # ``importlib.reload(config)`` — see the current value rather than the
+    # value snapshotted when this module was first imported.
+    mode = config.settings.GENDER_CLASSIFIER.strip().lower()
+
+    if mode == "pitch":
+        return _classify_f0(voiced_f0)
+
+    if mode == "ml":
+        # Local import — keeps the heavy transformers import lazy so
+        # pitch-only deployments never pay the load cost.
+        from pipeline import gender_ml
+        try:
+            label, conf = gender_ml.classify_audio(signal, sr)
+            log.info(
+                "Speaker %s ML: %s (confidence=%.3f)",
+                speaker_label, label, conf,
+            )
+            return label
+        except Exception:
+            log.exception(
+                "Speaker %s ML classifier raised; falling back to pitch",
+                speaker_label,
+            )
+            return _classify_f0(voiced_f0)
+
+    if mode == "ensemble":
+        pitch_label = _classify_f0(voiced_f0)
+        from pipeline import gender_ml
+        try:
+            ml_label, ml_conf = gender_ml.classify_audio(signal, sr)
+        except Exception:
+            log.warning(
+                "Speaker %s ML classifier raised; falling back to pitch=%s",
+                speaker_label, pitch_label,
+                exc_info=True,
+            )
+            return pitch_label
+        if ml_label != pitch_label:
+            log.info(
+                "Speaker %s classifiers disagree: pitch=%s ml=%s (conf=%.3f) "
+                "— using ML",
+                speaker_label, pitch_label, ml_label, ml_conf,
+            )
+        else:
+            log.info(
+                "Speaker %s classifiers agree: %s (ML conf=%.3f)",
+                speaker_label, ml_label, ml_conf,
+            )
+        return ml_label
+
+    # Unknown mode — log and fall back to pitch so a typo doesn't break prod.
+    log.warning(
+        "Unknown GENDER_CLASSIFIER=%r; falling back to pitch", mode,
+    )
+    return _classify_f0(voiced_f0)
+
+
 def detect_genders(
     audio: np.ndarray, sr: int, diarization: Annotation
 ) -> dict[str, str]:
@@ -93,7 +166,7 @@ def detect_genders(
             signal, sr=sr, fmin=FMIN_HZ, fmax=FMAX_HZ,
         )
         voiced_f0 = f0[np.isfinite(f0)]
-        gender = _classify_f0(f0)
+        gender = _classify_speaker(signal, sr, str(speaker), f0)
 
         # Log with enough context that an investigation (e.g. for the
         # S04E05 04:29 misclassification) can tell whether the call was
