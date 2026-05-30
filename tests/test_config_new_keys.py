@@ -4,7 +4,25 @@ deployments behave identically until the operator opts in.
 """
 import importlib
 
+import dotenv
+import pytest
+
 import config
+
+
+@pytest.fixture(autouse=True)
+def _isolate_from_dotenv(monkeypatch):
+    """Neutralize ``load_dotenv`` for these tests.
+
+    ``config.py`` calls ``load_dotenv()`` at module import, which re-reads
+    the developer's local ``.env`` after the test's ``monkeypatch.delenv``,
+    putting the var back. The test then sees the operator's override, not
+    the code's documented default. Patching ``dotenv.load_dotenv`` to a
+    no-op makes ``importlib.reload(config)`` observe the bare ``os.environ``
+    these tests construct — i.e. tests for the *code* default, not the
+    developer's deployment.
+    """
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *args, **kwargs: False)
 
 
 def test_default_gender_classifier_is_pitch(monkeypatch):
