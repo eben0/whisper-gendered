@@ -109,23 +109,28 @@ to later lines — but for addressee inference the trade-off pays off.
 
 
 def _build_user_message(
-    texts: list[str], previous_context: list[ContextLine] | None,
+    texts: list[str],
+    previous_context: list[ContextLine] | None,
+    speaker_gender: str | None = None,
+    addressee_gender: str | None = None,
 ) -> str:
-    """Compose the user message body, optionally prefixed by a scene-context block.
+    """Compose the user message body, optionally prefixed by scene context
+    and a per-batch ``(speaker, addressee)`` role hint.
 
     When ``previous_context`` is non-empty, prepends a numbered
-    'Earlier in this scene:' preamble followed by a 'Translate the
-    following lines:' marker, then the numbered ``texts``. Each context
-    line is rendered as ``[gender]: target_text`` — the target-language
-    text already produced for that line, prefixed with the speaker's
-    gender — so Claude can reconstruct turn-taking and infer the current
-    speaker's addressee even when a scene crosses a chunk boundary (where
-    the per-call ``addressee_gender`` hint is None). When
-    ``speaker_gender`` is None on a context line, the bracket is omitted.
+    'Earlier in this scene:' preamble with each context line rendered as
+    ``[gender]: target_text`` — already-translated target-language text
+    plus the speaker's gender label — so Claude can reconstruct turn-taking
+    and infer the current speaker's addressee across chunk boundaries.
 
-    When ``previous_context`` is empty or None, returns the bare numbered
-    list — byte-identical to the pre-context behaviour, so existing
-    callers see no change.
+    When ``speaker_gender`` and/or ``addressee_gender`` are provided,
+    emits a ``(speaker: X, addressee: Y)`` line just before the actual
+    translation targets. Putting this hint in the user message — not just
+    the system prompt — overrides narrative priors that a system-prompt
+    directive alone can lose to (e.g. "my wife" → assume male addressee).
+
+    When both ``previous_context`` and the role hints are absent, returns
+    the bare numbered list — byte-identical to the pre-context behaviour.
     """
     parts: list[str] = []
     if previous_context:
@@ -134,6 +139,15 @@ def _build_user_message(
             prefix = f"[{gender}]: " if gender else ""
             parts.append(f"  {j}. {prefix}{ctx}")
         parts.append("")
+    role_bits: list[str] = []
+    if speaker_gender:
+        role_bits.append(f"speaker: {speaker_gender}")
+    if addressee_gender:
+        role_bits.append(f"addressee: {addressee_gender}")
+    if role_bits:
+        parts.append(f"({', '.join(role_bits)})")
+        parts.append("")
+    if previous_context or role_bits:
         parts.append("Translate the following lines:")
     parts.extend(f"{i + 1}. {t}" for i, t in enumerate(texts))
     return "\n".join(parts)
@@ -168,7 +182,10 @@ def _translate_one_batch(
     source_language: str = "English",
     previous_context: list[ContextLine] | None = None,
 ) -> list[str]:
-    numbered = _build_user_message(texts, previous_context)
+    numbered = _build_user_message(
+        texts, previous_context,
+        speaker_gender=gender, addressee_gender=addressee_gender,
+    )
     response = client.messages.create(
         model=settings.CLAUDE_MODEL,
         max_tokens=MAX_TOKENS,
@@ -236,7 +253,10 @@ async def _translate_one_batch_async(
     source_language: str = "English",
     previous_context: list[ContextLine] | None = None,
 ) -> list[str]:
-    numbered = _build_user_message(texts, previous_context)
+    numbered = _build_user_message(
+        texts, previous_context,
+        speaker_gender=gender, addressee_gender=addressee_gender,
+    )
     response = await client.messages.create(
         model=settings.CLAUDE_MODEL,
         max_tokens=MAX_TOKENS,
