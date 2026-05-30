@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Trigger Bazarr to re-fetch the Hebrew SRT for OZ S04E05.
+"""Trigger Bazarr to search for / re-fetch a subtitle for a given episode.
 
 Two-stage auth (because the Bazarr instance is behind Traefik + Authentik):
 
 1. OAuth 2.0 password-grant to Authentik → access token
-2. Bazarr API call with both ``Authorization: Bearer <token>`` (for the
-   reverse proxy) AND ``X-API-KEY: <BAZARR_API_KEY>`` (for Bazarr itself)
+2. Bazarr API call with ``Authorization: Bearer <token>`` plus, when the
+   outpost is in cookie-session mode, a verbatim ``Cookie:`` header from
+   your browser session. Plus ``X-API-KEY`` for Bazarr's own auth.
 
 Reads credentials from ``.env.auth`` in the project root:
 
@@ -17,24 +18,21 @@ Reads credentials from ``.env.auth`` in the project root:
     OAUTH_PASSWORD
     BAZARR_API_KEY
     BAZARR_BASE_URL              # e.g. https://bazarr.example.com
-    BAZARR_EPISODE_ID            # Bazarr's internal episode id for OZ S04E05
     AUTHENTIK_COOKIE             # (optional) full ``Cookie:`` header value
                                  # grabbed from browser DevTools after login.
-                                 # Needed when the Authentik outpost is in
-                                 # cookie-session mode and Bearer alone is
-                                 # not enough (302 → /application/o/authorize).
 
 Usage:
-    .\\.venv\\Scripts\\python.exe scripts\\bazarr_request_oz_s04e05.py
-    .\\.venv\\Scripts\\python.exe scripts\\bazarr_request_oz_s04e05.py --dry-run
-    .\\.venv\\Scripts\\python.exe scripts\\bazarr_request_oz_s04e05.py --find-episode
+    # OAuth-only check.
+    py scripts/bazarr_search.py --dry-run
 
-``--dry-run`` exercises only the OAuth step (no Bazarr call) — useful to
-verify credentials without burning a translation cycle.
+    # List episodes for a series so you can find an episode id.
+    py scripts/bazarr_search.py --series-id 46 --list-episodes
 
-``--find-episode`` lists episodes for the configured Sonarr series id so
-you can grab ``BAZARR_EPISODE_ID`` for OZ S04E05. Set ``BAZARR_SERIES_ID``
-in ``.env.auth`` first.
+    # Trigger a subtitle search for a specific episode.
+    py scripts/bazarr_search.py --episode-id 2196
+
+    # Or look up by series + season + episode, then trigger.
+    py scripts/bazarr_search.py --series-id 46 --season 4 --episode 5
 """
 from __future__ import annotations
 
@@ -98,14 +96,13 @@ def _env(name: str) -> str:
 
 def _load_env() -> None:
     """Load `.env.auth` from the project root (sibling of scripts/)."""
-    project_root = Path(__file__).resolve().parent.parent
-    env_auth = project_root / ".env.auth"
+    env_auth = _PROJECT_ROOT / ".env.auth"
     if not env_auth.exists():
         sys.exit(f"missing {env_auth}")
     load_dotenv(env_auth, override=False)
 
 
-# ----- OAuth + Bazarr ----------------------------------------------------- #
+# ----- OAuth -------------------------------------------------------------- #
 
 
 def _load_cached_token() -> str | None:
@@ -163,6 +160,9 @@ def authenticate(*, force_refresh: bool = False) -> str:
     return token
 
 
+# ----- Bazarr ------------------------------------------------------------- #
+
+
 def _bazarr_headers(access_token: str) -> dict[str, str]:
     """Headers for a Bazarr API call.
 
@@ -188,14 +188,7 @@ def _bazarr_headers(access_token: str) -> dict[str, str]:
     return headers
 
 
-def find_episode(access_token: str) -> None:
-    """List episodes for ``BAZARR_SERIES_ID`` so you can pick the OZ S04E05 id.
-
-    Uses Bazarr's ``GET /api/episodes`` endpoint with ``seriesid``.
-    """
-    base = _env("BAZARR_BASE_URL").rstrip("/")
-    series_id = _env("BAZARR_SERIES_ID")
-    url = f"{base}/api/episodes?seriesid[]={series_id}"
+def _get_json(url: str, access_token: str) -> dict:
     r = httpx.get(url, headers=_bazarr_headers(access_token), timeout=30.0,
                   follow_redirects=True)
     _safe_print(f"GET {url} → {r.status_code}")
@@ -204,42 +197,62 @@ def find_episode(access_token: str) -> None:
     ctype = r.headers.get("content-type", "").lower()
     if "json" not in ctype:
         _safe_print(
-            f"⚠ response is not JSON (content-type={ctype!r}); "
-            f"first 400 chars below — this usually means the Authentik "
-            f"outpost intercepted with a login page despite the Bearer "
-            f"token. The proxy may require a session cookie instead of "
-            f"OAuth headers for non-browser API calls."
+            f"⚠ response is not JSON (content-type={ctype!r}); first 400 "
+            f"chars below — usually means the Authentik outpost intercepted "
+            f"with a login page. Set AUTHENTIK_COOKIE in .env.auth (full "
+            f"Cookie: header value from browser DevTools)."
         )
         _safe_print(r.text[:400])
         sys.exit(1)
-    eps = r.json().get("data", [])
+    return r.json()
+
+
+def list_episodes(access_token: str, series_id: int) -> list[dict]:
+    base = _env("BAZARR_BASE_URL").rstrip("/")
+    url = f"{base}/api/episodes?seriesid[]={series_id}"
+    return _get_json(url, access_token).get("data", [])
+
+
+def _ep_id(ep: dict) -> int | None:
+    """Bazarr response shape varies by version; try the common keys."""
+    v = ep.get("sonarrEpisodeId") or ep.get("episodeId") or ep.get("id")
+    return int(v) if v is not None else None
+
+
+def print_episodes(eps: list[dict]) -> None:
     _safe_print(f"{len(eps)} episodes:")
-    for ep in eps:
-        # Bazarr response shape varies by version; try the common keys.
+    # Sort by (season, episode) so the listing is stable + scannable.
+    for ep in sorted(eps, key=lambda e: (e.get("season", 0), e.get("episode", 0))):
         season = ep.get("season")
         episode = ep.get("episode")
-        sonarr_id = ep.get("sonarrEpisodeId") or ep.get("episodeId") or ep.get("id")
         title = ep.get("title", "")
-        _safe_print(f"  S{season:02d}E{episode:02d}  id={sonarr_id}  {title}")
+        _safe_print(f"  S{season:02d}E{episode:02d}  id={_ep_id(ep)}  {title}")
 
 
-def trigger_search(access_token: str) -> None:
-    """Ask Bazarr to download a subtitle for the configured episode.
+def resolve_episode_id(
+    access_token: str, series_id: int, season: int, episode: int,
+) -> int:
+    """Find the Bazarr/Sonarr episode id for ``series:season:episode``."""
+    for ep in list_episodes(access_token, series_id):
+        if ep.get("season") == season and ep.get("episode") == episode:
+            ep_id = _ep_id(ep)
+            if ep_id is not None:
+                return ep_id
+    sys.exit(
+        f"Could not find S{season:02d}E{episode:02d} in series {series_id}."
+    )
 
-    Bazarr's manual-search-and-download path:
+
+def trigger_search(access_token: str, episode_id: int) -> None:
+    """Ask Bazarr to download a subtitle for the given episode id.
+
+    Hits Bazarr's manual-search-and-download path:
       POST /api/providers/episodes?episodeid=<id>
 
     This triggers an immediate search across enabled providers (whisperai
-    among them) for the configured episode. The Whisper provider then
-    POSTs to our whisper-gend ASR endpoint.
-
-    If your Bazarr is on a version where this endpoint differs, the
-    likely alternatives are:
-      POST /api/episodes/wanted?episodeid=<id>
-      POST /api/episodes/subtitles    (body with episodeid + provider)
+    among them). The Whisper provider then POSTs to our whisper-gend ASR.
     """
     base = _env("BAZARR_BASE_URL").rstrip("/")
-    episode_id = _env("BAZARR_EPISODE_ID")
     url = f"{base}/api/providers/episodes?episodeid={episode_id}"
     r = httpx.post(url, headers=_bazarr_headers(access_token), timeout=30.0,
                    follow_redirects=True)
@@ -255,25 +268,67 @@ def trigger_search(access_token: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(__doc__ or "").split("\n\n")[0])
-    parser.add_argument("--dry-run", action="store_true",
-                        help="OAuth only; do not call Bazarr.")
-    parser.add_argument("--find-episode", action="store_true",
-                        help="List episodes for BAZARR_SERIES_ID so you can "
-                             "grab the right BAZARR_EPISODE_ID.")
-    parser.add_argument("--force-refresh-token", action="store_true",
-                        help="Ignore the cached OAuth token and request a "
-                             "fresh one. Use after credential changes.")
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="OAuth only; do not call Bazarr.")
+    parser.add_argument(
+        "--list-episodes", action="store_true",
+        help="List episodes for --series-id and exit. Use to find episode ids.")
+    parser.add_argument(
+        "--series-id", type=int,
+        help="Sonarr series id. Required for --list-episodes and for "
+             "--season/--episode lookup.")
+    parser.add_argument(
+        "--season", type=int,
+        help="Season number (with --series-id and --episode) to resolve the "
+             "episode id by lookup.")
+    parser.add_argument(
+        "--episode", type=int,
+        help="Episode number (with --series-id and --season) to resolve the "
+             "episode id by lookup.")
+    parser.add_argument(
+        "--episode-id", type=int,
+        help="Bazarr/Sonarr episode id to trigger a subtitle search for "
+             "(skips the season+episode lookup).")
+    parser.add_argument(
+        "--force-refresh-token", action="store_true",
+        help="Ignore the cached OAuth token and request a fresh one.")
     args = parser.parse_args()
 
     _load_env()
     access_token = authenticate(force_refresh=args.force_refresh_token)
     _safe_print(f"✓ OAuth ok  (token length={len(access_token)})")
+
     if args.dry_run:
         return
-    if args.find_episode:
-        find_episode(access_token)
+
+    if args.list_episodes:
+        if args.series_id is None:
+            sys.exit("--list-episodes requires --series-id.")
+        print_episodes(list_episodes(access_token, args.series_id))
         return
-    trigger_search(access_token)
+
+    if args.episode_id is not None:
+        trigger_search(access_token, args.episode_id)
+        return
+
+    if (args.series_id is not None
+            and args.season is not None
+            and args.episode is not None):
+        ep_id = resolve_episode_id(
+            access_token, args.series_id, args.season, args.episode,
+        )
+        _safe_print(
+            f"resolved series={args.series_id} "
+            f"S{args.season:02d}E{args.episode:02d} → episode id {ep_id}"
+        )
+        trigger_search(access_token, ep_id)
+        return
+
+    sys.exit(
+        "Need one of: --dry-run | --list-episodes --series-id N | "
+        "--episode-id N | --series-id N --season N --episode N"
+    )
 
 
 if __name__ == "__main__":
