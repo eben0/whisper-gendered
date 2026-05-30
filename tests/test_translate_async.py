@@ -90,21 +90,32 @@ def test_system_prompt_includes_you_form_guidance_even_without_addressee_hint():
     # the speaker's gender is set, regardless of addressee_gender. The spec
     # requires this so Claude considers second-person form selection in
     # ambiguous group scenes too, not only when a specific hint is provided.
+    # We check for the *contract* (mentioning "you" + matching the addressee)
+    # rather than a specific phrasing, so future minimisation passes don't
+    # break the test just because the wording got tighter.
     prompt = translate._system_prompt("Hebrew", "male", addressee_gender=None)
-    assert "addresses another person" in prompt
+    assert '"you"' in prompt
     assert "matching the addressee" in prompt
 
 
 class _RecordingMessages:
-    """Captures the system prompt of every create() call."""
+    """Captures the system prompt (and full kwargs) of every create() call."""
 
     def __init__(self, payloads):
         self._payloads = payloads
         self.calls = 0
         self.systems: list[str] = []
+        self.payloads: list[dict] = []
 
     async def create(self, **kwargs):
-        self.systems.append(kwargs.get("system", ""))
+        # ``system`` may be a plain string (legacy) or a list of content
+        # blocks (when cache_control is attached). Normalize to a string so
+        # tests can keep using simple substring assertions.
+        system = kwargs.get("system", "")
+        if isinstance(system, list):
+            system = "".join(b.get("text", "") for b in system if isinstance(b, dict))
+        self.systems.append(system)
+        self.payloads.append(kwargs)
         text = self._payloads[self.calls]
         self.calls += 1
         return _FakeResponse(text)
@@ -207,6 +218,46 @@ def test_system_prompt_prefers_natural_prepositions_for_hebrew():
     assert "preposition" in sp.lower() or "את" in sp
 
 
+# --- Language-specific prompt gating (PR #1 review feedback) -------------- #
+
+def test_system_prompt_skips_transliteration_for_latin_script_target():
+    """Transliteration guidance is meaningless when the target uses Latin
+    letters (French, Spanish, German, etc.) — proper nouns stay as-is.
+    The block must NOT appear in the system prompt for such targets.
+    """
+    for target in ("French", "Spanish", "German", "Italian", "Portuguese"):
+        sp = translate._system_prompt(target, None)
+        assert "transliterat" not in sp.lower(), (
+            f"transliteration guidance leaked into {target} prompt: {sp[:200]}"
+        )
+
+
+def test_system_prompt_keeps_transliteration_for_non_latin_targets():
+    """Non-Latin-script targets (Hebrew, Arabic, Russian, etc.) must still
+    receive transliteration guidance — proper nouns need to be re-spelled
+    in the target script.
+    """
+    for target in ("Hebrew", "Arabic", "Russian", "Hindi", "Japanese"):
+        sp = translate._system_prompt(target, None)
+        assert "transliterat" in sp.lower(), (
+            f"transliteration guidance missing for {target}: {sp[:200]}"
+        )
+
+
+def test_system_prompt_skips_hebrew_preposition_block_for_non_hebrew():
+    """The Hebrew-specific preposition rule (about ב, של, ל, מ, על, את)
+    must NOT appear when the target is anything other than Hebrew.
+    """
+    for target in ("Arabic", "Spanish", "French", "Russian", "German"):
+        sp = translate._system_prompt(target, None)
+        assert "את" not in sp, (
+            f"Hebrew-specific preposition block leaked into {target} prompt"
+        )
+        assert "ב, של" not in sp, (
+            f"Hebrew preposition list leaked into {target} prompt"
+        )
+
+
 def test_system_prompt_hints_max_chars_per_line():
     """The downstream formatter (Task 2) will split long lines, but the
     prompt should still steer Claude toward short subtitle-friendly output.
@@ -214,3 +265,74 @@ def test_system_prompt_hints_max_chars_per_line():
     import re
     sp = translate._system_prompt("Hebrew", None)
     assert re.search(r"\b(42|45|48|50)\b", sp) or "two lines" in sp.lower()
+
+
+# --- Task 6 (improve-gender-detection): previous-scene context window ------ #
+
+@pytest.mark.asyncio
+async def test_previous_context_appears_in_user_message():
+    """When previous_context is non-empty, the user message must include
+    a numbered 'Earlier in this scene:' block with each line prefixed by
+    the speaker's gender label so Claude can reconstruct turn-taking.
+    """
+    client = _RecordingAsyncClient([json.dumps({"translations": ["a-he"]})])
+    await translate.translate_batch_async(
+        ["new line"], None, "Hebrew", client,
+        previous_context=[
+            ("male", "הוא הגיע בצהריים."),
+            ("female", "היא כבר הייתה שם."),
+        ],
+    )
+    user_msg = client.messages.payloads[0]["messages"][0]["content"]
+    assert "Earlier in this scene" in user_msg
+    assert "[male]: הוא הגיע בצהריים." in user_msg
+    assert "[female]: היא כבר הייתה שם." in user_msg
+    assert "new line" in user_msg
+    # The actual line to translate must be clearly separated from context.
+    assert user_msg.index("new line") > user_msg.index("היא כבר הייתה שם.")
+
+
+@pytest.mark.asyncio
+async def test_previous_context_renders_without_prefix_when_gender_unknown():
+    """Plain-translate path passes None for speaker gender. Those lines
+    should render without the ``[gender]: `` prefix so the prompt doesn't
+    lie about information it doesn't have.
+    """
+    client = _RecordingAsyncClient([json.dumps({"translations": ["a-ja"]})])
+    await translate.translate_batch_async(
+        ["next line"], None, "Japanese", client,
+        previous_context=[(None, "earlier-line-1"), (None, "earlier-line-2")],
+    )
+    user_msg = client.messages.payloads[0]["messages"][0]["content"]
+    assert "earlier-line-1" in user_msg
+    assert "earlier-line-2" in user_msg
+    # No [male]: / [female]: prefixes because gender wasn't carried.
+    assert "[male]" not in user_msg
+    assert "[female]" not in user_msg
+
+
+@pytest.mark.asyncio
+async def test_previous_context_absent_when_window_is_empty():
+    """Default (empty) context should not add any preamble — the user
+    message looks identical to the pre-feature output.
+    """
+    client = _RecordingAsyncClient([json.dumps({"translations": ["a-he"]})])
+    await translate.translate_batch_async(
+        ["only line"], None, "Hebrew", client,
+    )
+    user_msg = client.messages.payloads[0]["messages"][0]["content"]
+    assert "Earlier in this scene" not in user_msg
+
+
+def test_system_prompt_mentions_context_use():
+    """When previous_context is plumbed, the system prompt should tell
+    Claude how to use it. We only check the directive sentence exists —
+    not the exact wording — so future re-phrasings don't break the test.
+    """
+    sp = translate._system_prompt("Hebrew", None)
+    # The directive can be present unconditionally (independent of the
+    # current batch's gender) — it costs nothing when no context lines
+    # are passed.
+    assert (
+        "earlier" in sp.lower() and "context" in sp.lower()
+    ), "system prompt should explain how to use the 'Earlier' context block"

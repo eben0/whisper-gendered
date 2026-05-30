@@ -10,11 +10,13 @@ Speakers with no detectable voiced frames default to "male".
 from __future__ import annotations
 
 import logging
+import time
 
 import librosa
 import numpy as np
 from pyannote.core import Annotation
 
+import config
 from config import settings
 
 log = logging.getLogger("pipeline.gender")
@@ -58,6 +60,105 @@ def _classify_f0(f0: np.ndarray) -> str:
     return "female" if median > GENDER_THRESHOLD_HZ else "male"
 
 
+def _classify_speaker(
+    signal: np.ndarray,
+    sr: int,
+    speaker_label: str,
+    voiced_f0: np.ndarray,
+    pitch_pyin_dt: float = 0.0,
+) -> str:
+    """Return "male" | "female" using the configured classifier.
+
+    ``voiced_f0`` is the librosa.pyin output for the pitch classifier;
+    ``signal`` is the raw concatenated audio for the ML classifier. Both
+    are computed once by ``detect_genders`` so the dispatcher just chooses
+    among them.
+
+    ``pitch_pyin_dt`` is the wall-clock cost of the upstream
+    ``librosa.pyin`` call — that IS the pitch classifier's real work, so
+    the ensemble perf gate compares against it (not against the
+    microsecond-scale ``_classify_f0`` median).
+    """
+    # Read through ``config.settings`` (not the import-time-bound ``settings``
+    # alias) so tests that reload ``config`` — and any future runtime
+    # ``importlib.reload(config)`` — see the current value rather than the
+    # value snapshotted when this module was first imported.
+    mode = config.settings.GENDER_CLASSIFIER.strip().lower()
+
+    if mode == "pitch":
+        return _classify_f0(voiced_f0)
+
+    if mode == "ml":
+        # Local import — keeps the heavy transformers import lazy so
+        # pitch-only deployments never pay the load cost.
+        from pipeline import gender_ml
+        try:
+            label, conf = gender_ml.classify_audio(signal, sr)
+            log.info(
+                "Speaker %s ML: %s (confidence=%.3f)",
+                speaker_label, label, conf,
+            )
+            return label
+        except Exception:
+            log.exception(
+                "Speaker %s ML classifier raised; falling back to pitch",
+                speaker_label,
+            )
+            return _classify_f0(voiced_f0)
+
+    if mode == "ensemble":
+        # The pitch classifier's real work is ``librosa.pyin`` upstream in
+        # ``detect_genders`` — ``_classify_f0`` is just a microsecond-scale
+        # median over its output. Compare ML wall time against the pyin
+        # cost so the gate's ratio is meaningful.
+        pitch_label = _classify_f0(voiced_f0)
+        pitch_dt = pitch_pyin_dt
+
+        from pipeline import gender_ml
+        t0 = time.perf_counter()
+        try:
+            ml_label, ml_conf = gender_ml.classify_audio(signal, sr)
+        except Exception:
+            log.warning(
+                "Speaker %s ML classifier raised; falling back to pitch=%s",
+                speaker_label, pitch_label,
+                exc_info=True,
+            )
+            return pitch_label
+        ml_dt = time.perf_counter() - t0
+
+        # Read through ``config.settings`` (not the cached import-time alias)
+        # so a runtime ``importlib.reload(config)`` — or a test that rebinds
+        # ``config.settings.X`` — is observed by this dispatcher.
+        budget = float(config.settings.GENDER_ML_TIME_BUDGET_RATIO)
+        if budget > 0 and pitch_dt > 0 and ml_dt > pitch_dt * budget:
+            log.warning(
+                "Speaker %s ML classifier slow: ml=%.2fs vs pitch=%.4fs "
+                "(ratio %.1fx > budget %.1fx)",
+                speaker_label, ml_dt, pitch_dt,
+                ml_dt / max(pitch_dt, 1e-6), budget,
+            )
+
+        if ml_label != pitch_label:
+            log.info(
+                "Speaker %s classifiers disagree: pitch=%s ml=%s (conf=%.3f) "
+                "— using ML",
+                speaker_label, pitch_label, ml_label, ml_conf,
+            )
+        else:
+            log.info(
+                "Speaker %s classifiers agree: %s (ML conf=%.3f)",
+                speaker_label, ml_label, ml_conf,
+            )
+        return ml_label
+
+    # Unknown mode — log and fall back to pitch so a typo doesn't break prod.
+    log.warning(
+        "Unknown GENDER_CLASSIFIER=%r; falling back to pitch", mode,
+    )
+    return _classify_f0(voiced_f0)
+
+
 def detect_genders(
     audio: np.ndarray, sr: int, diarization: Annotation
 ) -> dict[str, str]:
@@ -89,11 +190,20 @@ def detect_genders(
             continue
 
         signal = np.concatenate(chunks)
+        # Time ``librosa.pyin`` — the actual pitch-classification work — so
+        # the ensemble perf gate in ``_classify_speaker`` compares ML wall
+        # time against the right number. The post-processing median in
+        # ``_classify_f0`` is microsecond-scale and would make the gate
+        # trip on every speaker.
+        t0 = time.perf_counter()
         f0, voiced_flag, _voiced_prob = librosa.pyin(
             signal, sr=sr, fmin=FMIN_HZ, fmax=FMAX_HZ,
         )
+        pitch_pyin_dt = time.perf_counter() - t0
         voiced_f0 = f0[np.isfinite(f0)]
-        gender = _classify_f0(f0)
+        gender = _classify_speaker(
+            signal, sr, str(speaker), f0, pitch_pyin_dt=pitch_pyin_dt,
+        )
 
         # Log with enough context that an investigation (e.g. for the
         # S04E05 04:29 misclassification) can tell whether the call was

@@ -92,3 +92,158 @@ def test_boundary_case_at_threshold_is_male():
 def test_boundary_one_hz_above_threshold_is_female():
     f0 = np.array([float(GENDER_THRESHOLD_HZ) + 1.0] * MIN_VOICED_FRAMES)
     assert _classify_f0(f0) == "female"
+
+
+# --- Task 4: dispatcher --------------------------------------------------- #
+
+def test_detect_genders_uses_pitch_by_default(monkeypatch):
+    """Default classifier is 'pitch'; the ML path must not be touched."""
+    monkeypatch.setattr("config.settings.GENDER_CLASSIFIER", "pitch")
+    from pipeline import gender as g
+
+    # If gender_ml is touched in pitch mode, this raises.
+    monkeypatch.setattr(
+        "pipeline.gender_ml.classify_audio",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("ML classifier called in pitch mode")
+        ),
+    )
+    low = _tone(120.0)
+    ann = Annotation()
+    ann[PSegment(0.0, 1.0)] = "SPEAKER"
+    out = g.detect_genders(low, SR, ann)
+    assert out["SPEAKER"] == "male"
+
+
+def test_detect_genders_uses_ml_when_configured(monkeypatch):
+    """GENDER_CLASSIFIER=ml routes through gender_ml.classify_audio."""
+    monkeypatch.setattr("config.settings.GENDER_CLASSIFIER", "ml")
+    from pipeline import gender as g
+
+    called = {"n": 0}
+    def fake_ml(audio, sr):
+        called["n"] += 1
+        return ("female", 0.91)
+    monkeypatch.setattr("pipeline.gender_ml.classify_audio", fake_ml)
+
+    audio = np.zeros(int(0.5 * SR), dtype=np.float32)
+    ann = Annotation()
+    ann[PSegment(0.0, 0.5)] = "SPEAKER"
+    out = g.detect_genders(audio, SR, ann)
+    assert out["SPEAKER"] == "female"
+    assert called["n"] == 1
+
+
+def test_detect_genders_ensemble_logs_disagreement(monkeypatch, caplog):
+    """In ensemble mode the dispatcher runs BOTH, logs disagreements at
+    INFO, and ML's call wins (pitch is the fallback if ML errors).
+    """
+    import logging
+    caplog.set_level(logging.INFO, logger="pipeline.gender")
+    monkeypatch.setattr("config.settings.GENDER_CLASSIFIER", "ensemble")
+    from pipeline import gender as g
+
+    # Pitch says male (120 Hz tone < 165 Hz threshold).
+    # ML says female. Ensemble must pick ML's answer and log disagreement.
+    monkeypatch.setattr(
+        "pipeline.gender_ml.classify_audio",
+        lambda audio, sr: ("female", 0.85),
+    )
+    low = _tone(120.0)
+    ann = Annotation()
+    ann[PSegment(0.0, 1.0)] = "SPEAKER"
+    out = g.detect_genders(low, SR, ann)
+    assert out["SPEAKER"] == "female"
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("disagree" in m.lower() and "pitch=male" in m.lower()
+               and "ml=female" in m.lower() for m in msgs), (
+        f"expected disagreement log line; got: {msgs}"
+    )
+
+
+def test_ensemble_warns_when_ml_too_slow(monkeypatch, caplog):
+    """When ML classifier wall time exceeds pitch by more than the budget
+    ratio, _classify_speaker emits a WARNING.
+
+    The gate now compares ML wall time against ``librosa.pyin``'s wall
+    time (the real pitch work), so we stub pyin to a known-fast value
+    and let the ML fake sleep above the budget. Stubbing pyin keeps the
+    test deterministic and fast regardless of host pyin speed.
+    """
+    import logging, time
+    import numpy as np
+    caplog.set_level(logging.WARNING, logger="pipeline.gender")
+    monkeypatch.setattr("config.settings.GENDER_CLASSIFIER", "ensemble")
+    monkeypatch.setattr("config.settings.GENDER_ML_TIME_BUDGET_RATIO", 2.0)
+
+    def fast_pyin(signal, sr, fmin, fmax):
+        # Near-instant pyin -> pitch_dt ~= a few microseconds.
+        # Return frames-shaped arrays with the right dtypes/shape.
+        n = max(MIN_VOICED_FRAMES + 5, 50)
+        f0 = np.full(n, 120.0, dtype=float)
+        voiced_flag = np.ones(n, dtype=bool)
+        voiced_prob = np.ones(n, dtype=float)
+        return f0, voiced_flag, voiced_prob
+    monkeypatch.setattr("pipeline.gender.librosa.pyin", fast_pyin)
+
+    def slow_ml(audio, sr):
+        time.sleep(0.05)  # ML "takes" 50ms; pitch (stubbed pyin) is near-instant.
+        return ("female", 0.9)
+    monkeypatch.setattr("pipeline.gender_ml.classify_audio", slow_ml)
+
+    from pipeline import gender as g
+    low = _tone(120.0)
+    ann = Annotation()
+    ann[PSegment(0.0, 1.0)] = "SPEAKER_X"
+    g.detect_genders(low, SR, ann)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("classifier slow" in m.lower() for m in msgs), (
+        f"no perf warning; got {msgs}"
+    )
+
+
+def test_ensemble_does_not_warn_when_ml_fast(monkeypatch, caplog):
+    """When ML wall time is comparable to pitch, the gate must NOT fire."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="pipeline.gender")
+    monkeypatch.setattr("config.settings.GENDER_CLASSIFIER", "ensemble")
+    monkeypatch.setattr("config.settings.GENDER_ML_TIME_BUDGET_RATIO", 5.0)
+
+    def fast_ml(audio, sr):
+        # No sleep — returns near-instantly, well within the budget.
+        return ("female", 0.9)
+    monkeypatch.setattr("pipeline.gender_ml.classify_audio", fast_ml)
+
+    from pipeline import gender as g
+    low = _tone(120.0)
+    ann = Annotation()
+    ann[PSegment(0.0, 1.0)] = "SPEAKER_X"
+    g.detect_genders(low, SR, ann)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not any("classifier slow" in m.lower() for m in msgs), (
+        f"gate fired on fast ML; got {msgs}"
+    )
+
+
+def test_detect_genders_ensemble_falls_back_to_pitch_when_ml_errors(monkeypatch, caplog):
+    """If the ML call raises, ensemble mode must not crash the request —
+    log a warning and use the pitch answer.
+    """
+    import logging
+    caplog.set_level(logging.WARNING, logger="pipeline.gender")
+    monkeypatch.setattr("config.settings.GENDER_CLASSIFIER", "ensemble")
+    from pipeline import gender as g
+
+    def boom(audio, sr):
+        raise RuntimeError("simulated wav2vec2 OOM")
+    monkeypatch.setattr("pipeline.gender_ml.classify_audio", boom)
+
+    low = _tone(120.0)
+    ann = Annotation()
+    ann[PSegment(0.0, 1.0)] = "SPEAKER"
+    out = g.detect_genders(low, SR, ann)
+    assert out["SPEAKER"] == "male"  # pitch fallback
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("fall" in m.lower() and "pitch" in m.lower() for m in msgs)

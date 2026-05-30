@@ -18,7 +18,9 @@ import logging
 
 import anthropic
 
+import prompt
 from config import settings
+from pipeline.lang import uses_non_latin_script
 
 log = logging.getLogger("pipeline.translate")
 
@@ -50,67 +52,105 @@ def _system_prompt(
     addressee_gender: str | None = None,
     source_language: str = "English",
 ) -> str:
-    base = (
-        f"You are an expert subtitle translator. Translate each numbered line "
-        f"from {source_language} into {target_language}. Produce natural, idiomatic, "
-        f"concise {target_language} suitable for on-screen subtitles. Preserve "
-        f"meaning and tone; do not add notes or explanations."
-    )
-    # Style guidance — applies to every translation regardless of gender.
-    base += (
-        f" Transliterate proper nouns (people's names, place names, brand "
-        f"names, nicknames) into the {target_language} script: write them as "
-        f"the audience would naturally read them aloud, not as Latin letters. "
-        f"Example: 'Mondo' -> 'מונדו', 'T' -> 'טי'."
-    )
-    base += (
-        f" Render slang, idioms, and figures of speech with their natural "
-        f"{target_language} equivalents — not literal word-for-word calques. "
-        f"If a {source_language} idiom has no clean equivalent, prefer the "
-        f"closest colloquial phrasing in {target_language}."
-    )
-    base += (
-        f" Choose the natural {target_language} preposition for each "
-        f"construction. For Hebrew specifically: prefer ב, של, ל, מ, על "
-        f"where the grammar calls for them; reserve את only for marking a "
-        f"definite direct object — never use את as a generic substitute."
-    )
-    base += (
-        " Keep each line short — aim for at most 42 characters per visible "
-        "line. For longer utterances, prefer two short lines over one long "
-        "one; end thoughts on natural pause-points (after a comma, "
-        "conjunction, or clause boundary) when possible, so a downstream "
-        "formatter can break cleanly."
-    )
+    """Assemble the system prompt from templates in ``prompt/translate/``.
+
+    Language-specific sections are only included when relevant:
+    - transliteration guidance is skipped for Latin-script targets
+      (French, Spanish, German, etc.) where proper nouns stay as-is.
+    - Hebrew-specific preposition guidance is only included when the
+      target is Hebrew.
+    """
+    parts: list[str] = [
+        prompt.load("translate/base",
+                    source_language=source_language, target_language=target_language),
+    ]
+    if uses_non_latin_script(target_language):
+        parts.append(prompt.load("translate/style_transliteration",
+                                 target_language=target_language))
+    parts.append(prompt.load("translate/style_slang",
+                             source_language=source_language,
+                             target_language=target_language))
+    parts.append(prompt.load("translate/style_prepositions",
+                             source_language=source_language,
+                             target_language=target_language))
+    if target_language == "Hebrew":
+        parts.append(prompt.load("translate/style_prepositions_hebrew"))
+    parts.append(prompt.load("translate/style_length"))
     if gender is not None:
-        base += (
-            f" The speaker of these lines is {gender}. Use grammatically correct "
-            f"{gender} forms throughout — verb conjugation, adjective and "
-            f"participle agreement, imperatives, and pronouns must all match a "
-            f"{gender} speaker referring to themselves."
-        )
-        base += (
-            f" When the speaker addresses another person ({source_language} \"you\""
-            f" or its equivalent), choose the {target_language} form matching the "
-            f"addressee's number and gender."
-        )
+        parts.append(prompt.load("translate/gender_speaker", gender=gender))
+        parts.append(prompt.load("translate/gender_you_form",
+                                 source_language=source_language,
+                                 target_language=target_language))
         if addressee_gender is not None:
-            base += (
-                f" The most likely addressee in this exchange is "
-                f"{addressee_gender}; prefer that form for singular \"you\" "
-                f"unless context clearly implies a different addressee."
-            )
-        base += (
-            " Infer number from context — collective cues like \"you all\", "
-            "\"you guys\", or plural verbs imply plural. When number is "
-            "ambiguous in a multi-person scene, prefer the inclusive plural "
-            "form (e.g., אתם in Hebrew). Do not mix forms within a single line."
-        )
-    base += (
-        " Return a JSON object with a 'translations' array containing exactly "
-        "one translated string per input line, in the same order."
-    )
-    return base
+            parts.append(prompt.load("translate/gender_addressee",
+                                     addressee_gender=addressee_gender))
+        parts.append(prompt.load("translate/gender_number"))
+    parts.append(prompt.load("translate/scene_context",
+                             target_language=target_language))
+    parts.append(prompt.load("translate/output_format"))
+    return " ".join(parts)
+
+
+ContextLine = tuple[str | None, str]
+"""One line of prior-scene context: ``(speaker_gender, target_text)``.
+
+``speaker_gender`` is ``"male"`` / ``"female"`` for the gender-aware path,
+or ``None`` when the source pipeline doesn't carry gender (plain translate).
+
+``target_text`` is the line in the *target language* (already translated by
+an earlier batch in the same request) — not the source. Target text is
+chosen on purpose: gendered languages (Hebrew, Spanish, Russian, …) encode
+the addressee's gender directly in verb conjugations and pronouns, giving
+Claude the signal it needs to reconstruct turn-taking. Source English
+``"you"`` is gender-neutral and reveals nothing about who was addressing
+whom. The cost is that a mistranslated earlier line propagates its error
+to later lines — but for addressee inference the trade-off pays off.
+"""
+
+
+def _build_user_message(
+    texts: list[str],
+    previous_context: list[ContextLine] | None,
+    speaker_gender: str | None = None,
+    addressee_gender: str | None = None,
+) -> str:
+    """Compose the user message body, optionally prefixed by scene context
+    and a per-batch ``(speaker, addressee)`` role hint.
+
+    When ``previous_context`` is non-empty, prepends a numbered
+    'Earlier in this scene:' preamble with each context line rendered as
+    ``[gender]: target_text`` — already-translated target-language text
+    plus the speaker's gender label — so Claude can reconstruct turn-taking
+    and infer the current speaker's addressee across chunk boundaries.
+
+    When ``speaker_gender`` and/or ``addressee_gender`` are provided,
+    emits a ``(speaker: X, addressee: Y)`` line just before the actual
+    translation targets. Putting this hint in the user message — not just
+    the system prompt — overrides narrative priors that a system-prompt
+    directive alone can lose to (e.g. "my wife" → assume male addressee).
+
+    When both ``previous_context`` and the role hints are absent, returns
+    the bare numbered list — byte-identical to the pre-context behaviour.
+    """
+    parts: list[str] = []
+    if previous_context:
+        parts.append("Earlier in this scene:")
+        for j, (gender, ctx) in enumerate(previous_context, start=1):
+            prefix = f"[{gender}]: " if gender else ""
+            parts.append(f"  {j}. {prefix}{ctx}")
+        parts.append("")
+    role_bits: list[str] = []
+    if speaker_gender:
+        role_bits.append(f"speaker: {speaker_gender}")
+    if addressee_gender:
+        role_bits.append(f"addressee: {addressee_gender}")
+    if role_bits:
+        parts.append(f"({', '.join(role_bits)})")
+        parts.append("")
+    if previous_context or role_bits:
+        parts.append("Translate the following lines:")
+    parts.extend(f"{i + 1}. {t}" for i, t in enumerate(texts))
+    return "\n".join(parts)
 
 
 def _chunks(texts: list[str]) -> list[list[str]]:
@@ -133,6 +173,59 @@ def _chunks(texts: list[str]) -> list[list[str]]:
     return batches
 
 
+def _system_blocks(
+    target_language: str,
+    gender: str | None,
+    addressee_gender: str | None,
+    source_language: str,
+) -> list[dict]:
+    """Wrap the system prompt as a single cacheable content block.
+
+    Setting ``cache_control`` on the system block opts this request into
+    Anthropic prompt caching: subsequent calls within the cache TTL that
+    share the same system prompt skip re-encoding it on the input side
+    (~90% input-token discount on the cached portion). All batches inside
+    one ``/asr`` request use the same system prompt — same target language,
+    same speaker gender, same addressee gender — so the first batch primes
+    the cache and the rest hit it.
+
+    Caveat: caching requires the cached prefix to exceed a model-specific
+    minimum (currently 1024 tokens for Sonnet). Our gender-aware Hebrew
+    system prompt is ~550 tokens, so the API may silently fall back to
+    non-cached behaviour today. Leaving ``cache_control`` in place is
+    forward-compatible: if/when prompts grow past the threshold or
+    Anthropic lowers it, caching kicks in automatically.
+    """
+    return [{
+        "type": "text",
+        "text": _system_prompt(target_language, gender, addressee_gender, source_language),
+        "cache_control": {"type": "ephemeral"},
+    }]
+
+
+def _log_usage(response, batch_size: int) -> None:
+    """Emit one grep-friendly INFO line per Claude call with token counts.
+
+    Logs raw counts only — pricing varies by model and changes over time, so
+    cost math stays out of code. Grep ``TRANSLATE_USAGE`` to sum a request's
+    totals; ``cache_read`` / ``cache_creation`` are 0 today (we don't pass
+    ``cache_control`` yet) but populated automatically if/when we enable
+    prompt caching, so the line format won't change later.
+    """
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    log.info(
+        "TRANSLATE_USAGE model=%s batch=%d input=%d output=%d cache_read=%d cache_creation=%d",
+        settings.CLAUDE_MODEL,
+        batch_size,
+        getattr(usage, "input_tokens", 0) or 0,
+        getattr(usage, "output_tokens", 0) or 0,
+        getattr(usage, "cache_read_input_tokens", 0) or 0,
+        getattr(usage, "cache_creation_input_tokens", 0) or 0,
+    )
+
+
 def _translate_one_batch(
     texts: list[str],
     gender: str | None,
@@ -140,15 +233,20 @@ def _translate_one_batch(
     client: anthropic.Anthropic,
     addressee_gender: str | None = None,
     source_language: str = "English",
+    previous_context: list[ContextLine] | None = None,
 ) -> list[str]:
-    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
+    numbered = _build_user_message(
+        texts, previous_context,
+        speaker_gender=gender, addressee_gender=addressee_gender,
+    )
     response = client.messages.create(
         model=settings.CLAUDE_MODEL,
         max_tokens=MAX_TOKENS,
-        system=_system_prompt(target_language, gender, addressee_gender, source_language),
+        system=_system_blocks(target_language, gender, addressee_gender, source_language),
         output_config={"format": _OUTPUT_FORMAT},
         messages=[{"role": "user", "content": numbered}],
     )
+    _log_usage(response, len(texts))
     raw = next((b.text for b in response.content if b.type == "text"), "")
     try:
         translations = json.loads(raw).get("translations", [])
@@ -172,6 +270,7 @@ def translate_batch(
     client: anthropic.Anthropic,
     addressee_gender: str | None = None,
     source_language: str = "English",
+    previous_context: list[ContextLine] | None = None,
 ) -> list[str]:
     """Translate ``texts`` into ``target_language``, returning one string each.
 
@@ -180,7 +279,10 @@ def translate_batch(
     grammatical "you" form for languages where second-person is gender-marked.
     ``source_language`` defaults to English so existing callers stay valid;
     the orchestrator passes the value derived from the request's ``language``
-    query param.
+    query param. ``previous_context`` is an optional list of recent prior
+    translation lines that share scene context — they are prepended to the
+    user message as a background block (not re-translated) so Claude can
+    disambiguate addressee gender/number and keep vocabulary consistent.
     Output length always equals input length.
     """
     if not texts:
@@ -189,7 +291,8 @@ def translate_batch(
     for batch in _chunks(texts):
         out.extend(
             _translate_one_batch(
-                batch, gender, target_language, client, addressee_gender, source_language,
+                batch, gender, target_language, client, addressee_gender,
+                source_language, previous_context=previous_context,
             )
         )
     return out
@@ -202,15 +305,20 @@ async def _translate_one_batch_async(
     client: anthropic.AsyncAnthropic,
     addressee_gender: str | None = None,
     source_language: str = "English",
+    previous_context: list[ContextLine] | None = None,
 ) -> list[str]:
-    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
+    numbered = _build_user_message(
+        texts, previous_context,
+        speaker_gender=gender, addressee_gender=addressee_gender,
+    )
     response = await client.messages.create(
         model=settings.CLAUDE_MODEL,
         max_tokens=MAX_TOKENS,
-        system=_system_prompt(target_language, gender, addressee_gender, source_language),
+        system=_system_blocks(target_language, gender, addressee_gender, source_language),
         output_config={"format": _OUTPUT_FORMAT},
         messages=[{"role": "user", "content": numbered}],
     )
+    _log_usage(response, len(texts))
     raw = next((b.text for b in response.content if b.type == "text"), "")
     try:
         translations = json.loads(raw).get("translations", [])
@@ -234,6 +342,7 @@ async def translate_batch_async(
     client: anthropic.AsyncAnthropic,
     addressee_gender: str | None = None,
     source_language: str = "English",
+    previous_context: list[ContextLine] | None = None,
 ) -> list[str]:
     """Async counterpart of ``translate_batch`` for the chunked orchestrator.
 
@@ -241,7 +350,9 @@ async def translate_batch_async(
     handled by the caller's semaphore. ``addressee_gender`` (optional) hints the
     grammatical "you" form. ``source_language`` defaults to English; the
     orchestrator passes the value derived from the request's ``language``
-    query param. Output length always equals input length.
+    query param. ``previous_context`` (optional) is shared across all
+    sub-batches of this call — the same scene-context window is prepended
+    to each sub-batch's user message. Output length always equals input length.
     """
     if not texts:
         return []
@@ -249,7 +360,8 @@ async def translate_batch_async(
     for batch in _chunks(texts):
         out.extend(
             await _translate_one_batch_async(
-                batch, gender, target_language, client, addressee_gender, source_language,
+                batch, gender, target_language, client, addressee_gender,
+                source_language, previous_context=previous_context,
             )
         )
     return out

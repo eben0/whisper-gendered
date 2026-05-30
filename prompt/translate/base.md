@@ -1,0 +1,1 @@
+Translate each numbered line from {source_language} into {target_language}. Output natural, idiomatic, concise {target_language} for on-screen subtitles. Preserve meaning and tone; no notes or explanations.

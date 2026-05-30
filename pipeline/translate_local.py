@@ -8,8 +8,9 @@ GPU when available, falling back to CPU otherwise.
 The public function is named ``translate_batch_async`` and mirrors the
 signature of the Claude backend exactly — the ``client`` parameter is accepted
 but ignored so the orchestrator's call site stays unchanged. ``addressee_gender``
-is currently not used by this backend (local seq2seq models are not
-instruction-followers); the speaker's ``gender`` may be prepended as a
+and ``previous_context`` are likewise not used by this backend (local seq2seq
+models are not instruction-followers and have no separate addressee-hint or
+scene-context pathway); the speaker's ``gender`` may be prepended as a
 best-effort hint when ``LOCAL_USE_GENDER_PREFIX`` is enabled.
 
 Two model families are supported transparently:
@@ -291,6 +292,7 @@ async def translate_batch_async(
     client: Any = None,  # ignored — kept for signature parity with the Claude backend
     addressee_gender: str | None = None,  # ignored by this backend (see module docstring)
     source_language: str = "English",
+    previous_context: list[tuple[str | None, str]] | None = None,  # ignored — see module docstring
 ) -> list[str]:
     """Translate ``texts`` into ``target_language``, returning one string each.
 
@@ -301,8 +303,9 @@ async def translate_batch_async(
     display name via ``pipeline.lang.language_name``).
     Output length always equals input length; an empty input returns ``[]``.
 
-    ``client`` and ``addressee_gender`` are accepted but unused: the local model
-    is not an instruction-followed API and has no separate addressee-hint pathway.
+    ``client``, ``addressee_gender``, and ``previous_context`` are accepted but
+    unused: the local model is not an instruction-followed API and has no
+    separate addressee-hint or scene-context pathway.
     """
     if not texts:
         return []

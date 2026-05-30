@@ -96,6 +96,18 @@ LANGUAGE_SCRIPTS: dict[str, re.Pattern[str]] = {
 }
 
 
+def uses_non_latin_script(target_language: str) -> bool:
+    """True when ``target_language`` is written in a non-Latin script.
+
+    Keyed off ``LANGUAGE_SCRIPTS`` so we have one source of truth — a
+    language with an entry there has a non-Latin primary script. Used to
+    gate prompt sections that only make sense for non-Latin targets
+    (e.g. transliteration, since Latin-script targets just keep proper
+    nouns as-is).
+    """
+    return target_language in LANGUAGE_SCRIPTS
+
+
 def target_script_ratio(text: str, target_language: str) -> float | None:
     """Fraction of letters in ``text`` matching the target language's script.
 

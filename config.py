@@ -1,8 +1,4 @@
-"""Configuration for the gender-aware ASR server.
-
-All settings are loaded from environment variables (optionally via a `.env`
-file). Access them through the module-level ``settings`` singleton.
-"""
+"""Settings loaded from env / .env. Access via the ``settings`` singleton."""
 
 from __future__ import annotations
 
@@ -11,14 +7,10 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
-# Load .env from the project root if present. Real environment variables always
-# win over .env values.
 load_dotenv()
 
 
-# Languages where speaker gender affects grammar. When TARGET_LANGUAGE is one of
-# these, the server runs the full diarization + gender-detection pipeline and
-# passes the speaker's gender to the translation prompt.
+# Languages whose grammar depends on speaker gender.
 GENDER_AWARE_LANGUAGES = {
     "Hebrew", "Arabic", "French", "Spanish", "Italian", "Portuguese",
     "German", "Russian", "Polish", "Ukrainian", "Hindi", "Romanian",
@@ -53,35 +45,36 @@ class Settings:
     COMPUTE_TYPE: str = os.getenv("COMPUTE_TYPE", "float16")
     DEVICE: str = os.getenv("DEVICE", "cuda")
     CONCURRENT_JOBS: int = _env_int("CONCURRENT_JOBS", 1)
-    # Language *name* (e.g. "Hebrew") to translate into, or "none" to disable
-    # translation and behave as a plain faster-whisper ASR server.
+    # Language name (e.g. "Hebrew") or "none" to transcribe only.
     TARGET_LANGUAGE: str = os.getenv("TARGET_LANGUAGE", "none")
     HF_TOKEN: str | None = os.getenv("HF_TOKEN")
     ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
     CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
     GENDER_THRESHOLD_HZ: float = _env_float("GENDER_THRESHOLD_HZ", 165.0)
-    # Chunked-pipeline tuning.
+    # "pitch" (default) | "ml" (wav2vec2) | "ensemble" (both, ML wins).
+    GENDER_CLASSIFIER: str = os.getenv("GENDER_CLASSIFIER", "pitch")
+    GENDER_ML_MODEL: str = os.getenv(
+        "GENDER_ML_MODEL",
+        "alefiury/wav2vec2-large-xlsr-53-gender-recognition-librispeech",
+    )
+    # WARN when ML wall time > pitch wall time × this. 0 disables.
+    GENDER_ML_TIME_BUDGET_RATIO: float = _env_float("GENDER_ML_TIME_BUDGET_RATIO", 5.0)
+    # Also emit a second SRT using the alternate classifier (A/B side-by-side).
+    GENDER_AB_OUTPUT: bool = _env_bool("GENDER_AB_OUTPUT", False)
     CHUNK_DURATION_SEC: int = _env_int("CHUNK_DURATION_SEC", 300)
     TRANSLATE_CONCURRENCY: int = _env_int("TRANSLATE_CONCURRENCY", 3)
     CLAUDE_MAX_RETRIES: int = _env_int("CLAUDE_MAX_RETRIES", 4)
-    # When true (default), the orchestrator passes the previous group's speaker
-    # gender as an addressee hint to the translation prompt. Set to false to
-    # disable that specific hint while keeping the broader "you"-form guidance
-    # in the system prompt — useful for A/B testing the addressee feature.
+    # Pass the previous group's speaker gender as the likely "you" addressee.
     ADDRESSEE_GENDER_HINT_ENABLED: bool = _env_bool("ADDRESSEE_GENDER_HINT_ENABLED", True)
-    # Optional side-file save: write the produced SRT directly next to the
-    # source video on a mounted share, in addition to whatever the calling
-    # client does. Disabled unless both prefixes are set. Useful when the
-    # client (e.g. Bazarr) names its saved file based on the requested source
-    # language and the actual output language differs (TARGET_LANGUAGE override).
+    # Optional: also write the SRT next to the source video on a mounted share.
+    # Set BOTH prefixes to enable; they map the client's mount view to ours.
     SAVE_SRT_VIDEO_PREFIX: str = os.getenv("SAVE_SRT_VIDEO_PREFIX", "")
     SAVE_SRT_LOCAL_PREFIX: str = os.getenv("SAVE_SRT_LOCAL_PREFIX", "")
     SAVE_SRT_SUFFIX: str = os.getenv("SAVE_SRT_SUFFIX", ".he.srt")
-    # Translation backend selection. "claude" (default) is the existing
-    # Anthropic API path; "local" uses pipeline/translate_local.py with a
-    # HuggingFace seq2seq model. All LOCAL_* keys below are only consulted when
-    # TRANSLATION_BACKEND=local.
+    # "claude" (Anthropic API) | "local" (HF seq2seq on the Whisper GPU).
     TRANSLATION_BACKEND: str = os.getenv("TRANSLATION_BACKEND", "claude")
+    # Preceding source-language segments injected as "earlier in this scene". 0 disables.
+    TRANSLATE_CONTEXT_LINES: int = _env_int("TRANSLATE_CONTEXT_LINES", 4)
     LOCAL_TRANSLATION_MODEL: str = os.getenv(
         "LOCAL_TRANSLATION_MODEL", "facebook/nllb-200-distilled-600M"
     )
@@ -89,10 +82,7 @@ class Settings:
     LOCAL_TRANSLATION_DTYPE: str = os.getenv("LOCAL_TRANSLATION_DTYPE", "float16")
     LOCAL_BATCH_SIZE: int = _env_int("LOCAL_BATCH_SIZE", 16)
     LOCAL_MAX_LENGTH: int = _env_int("LOCAL_MAX_LENGTH", 512)
-    # Off by default: local seq2seq models aren't instruction-followers, so
-    # the gender hint gets translated as part of the source string rather
-    # than steering the output. Opt in only if you've verified it helps for
-    # your specific model.
+    # Prepend a gender hint to the source text (local models don't follow instructions).
     LOCAL_USE_GENDER_PREFIX: bool = _env_bool("LOCAL_USE_GENDER_PREFIX", False)
     DEBUG: bool = _env_bool("DEBUG", False)
 

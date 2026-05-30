@@ -245,6 +245,28 @@ async def test_translate_batch_async_accepts_and_ignores_client_and_addressee(mo
     assert out == ["HE:0"]
 
 
+@pytest.mark.asyncio
+async def test_translate_batch_async_accepts_previous_context_kwarg(monkeypatch):
+    # The local backend doesn't use previous_context (no instruction-following),
+    # but must accept it for signature parity with the Claude backend so the
+    # orchestrator can pass it uniformly regardless of TRANSLATION_BACKEND.
+    captured: dict = {}
+
+    def fake_sync(texts, gender, tgt, src):
+        captured["args"] = (texts, gender, tgt, src)
+        return ["X" for _ in texts]
+
+    monkeypatch.setattr(translate_local, "_translate_sync", fake_sync)
+
+    out = await translate_local.translate_batch_async(
+        ["hello"], None, "Hebrew",
+        previous_context=["earlier line 1", "earlier line 2"],
+    )
+    assert out == ["X"]
+    # The context must NOT leak into the model call — local backend ignores it.
+    assert captured["args"] == (["hello"], None, "Hebrew", "English")
+
+
 def test_is_nllb_tokenizer_keys_on_class_name():
     # Regression: this used to check ``hasattr(tokenizer, "lang_code_to_id")``,
     # which silently returned False on transformers 5.x (the attribute was
