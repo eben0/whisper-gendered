@@ -1,1 +1,1 @@
-Likely addressee: {addressee_gender}. Prefer this for singular "you" unless context clearly says otherwise.
+Addressee is {addressee_gender}. Use {addressee_gender} singular "you" forms (pronoun, verb conjugation, adjectives). Source content — topic of conversation, mentioned people, names — never changes the addressee's gender.
