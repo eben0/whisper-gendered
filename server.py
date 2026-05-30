@@ -456,6 +456,17 @@ async def _translate_chunk(
                 ctx_snapshot = (
                     list(context_window) if context_window else []
                 )
+                # DIAGNOSTIC (temporary): log the exact context handed to
+                # Claude alongside what's being translated. Lets us trace
+                # why the addressee fix isn't engaging on certain lines
+                # (e.g. Oz S04E05 line 52). Remove after the cause is
+                # identified.
+                log.info(
+                    "[chunk %d] BATCH speaker=%s addressee=%s "
+                    "ctx_len=%d ctx=%r src=%r",
+                    idx, spk_gender, addressee, len(ctx_snapshot),
+                    ctx_snapshot, source_texts,
+                )
                 translated = await translate.translate_batch_async(
                     source_texts, spk_gender, target, client,
                     addressee_gender=addressee,
@@ -615,6 +626,11 @@ async def _run_plain_translate(
         async with sem:
             source_texts = [s.text for s in chunk.segments]
             ctx_snapshot = list(context_window) if context_window else []
+            # DIAGNOSTIC (temporary): see _run_gender_aware sibling for context.
+            log.info(
+                "PLAIN BATCH ctx_len=%d ctx=%r src=%r",
+                len(ctx_snapshot), ctx_snapshot, source_texts,
+            )
             translated = await translate.translate_batch_async(
                 source_texts, None, target, client,
                 source_language=source_language,
