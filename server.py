@@ -21,12 +21,11 @@ import sys
 import tempfile
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from core import cuda
+from core import concurrency, cuda
 cuda.bootstrap()
 
 import numpy as np
@@ -58,15 +57,6 @@ log = logging.getLogger("server")
 VERSION = "1.0.0"
 
 app = FastAPI(title="Gender-Aware Hebrew Subtitle Server", version=VERSION)
-
-# Gate concurrent GPU jobs; acquire BEFORE dispatching to the executor.
-_semaphore = asyncio.Semaphore(settings.CONCURRENT_JOBS)
-_executor = ThreadPoolExecutor(max_workers=max(2, settings.CONCURRENT_JOBS + 1))
-_jobs_in_system = 0  # queued + running, for /status
-
-async def run_in_thread(fn, *args):
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_executor, fn, *args)
 
 
 _async_anthropic_client = None
@@ -473,7 +463,7 @@ async def _run_gender_aware(
     Gender classification still runs on every call (it's cheap, and the
     classifier may have been flipped between passes).
     """
-    audio, sr = await run_in_thread(_load_wav_mono, audio_path)
+    audio, sr = await concurrency.run_in_thread(_load_wav_mono, audio_path)
     chunks = make_chunks(segments, settings.CHUNK_DURATION_SEC)
     annotations_used: list[Any] = []
     sem = asyncio.Semaphore(settings.TRANSLATE_CONCURRENCY)
@@ -500,7 +490,7 @@ async def _run_gender_aware(
                 i0 = max(0, int(chunk.start * sr))
                 i1 = min(len(audio), int(chunk.end * sr))
                 slice_ = audio[i0:i1]
-                genders = await run_in_thread(
+                genders = await concurrency.run_in_thread(
                     gender.detect_genders, slice_, sr, annotation,
                 )
                 log.info(
@@ -509,7 +499,7 @@ async def _run_gender_aware(
                     idx + 1, len(chunks), len(genders),
                 )
             else:
-                annotation, genders = await run_in_thread(
+                annotation, genders = await concurrency.run_in_thread(
                     _diarize_and_gender, audio, sr, chunk.start, chunk.end
                 )
                 log.info(
@@ -628,7 +618,7 @@ async def run_pipeline_async(
     leave the parameter at its default and observe no behavior change.
     """
     t0 = time.monotonic()
-    segments = await run_in_thread(transcribe.transcribe, audio_path, language)
+    segments = await concurrency.run_in_thread(transcribe.transcribe, audio_path, language)
     transcribe_elapsed = time.monotonic() - t0
     # Two log lines: the historical timing line, then an explicit-count
     # line worded for grep ("transcribed N segments"). The count line
@@ -809,10 +799,10 @@ async def warmup() -> None:
     tmp = Path(tempfile.gettempdir()) / f"warmup_{uuid.uuid4().hex}.wav"
     try:
         _write_silent_wav(tmp)
-        await run_in_thread(transcribe.warmup, tmp)
+        await concurrency.run_in_thread(transcribe.warmup, tmp)
         if settings.is_gender_aware():
             try:
-                await run_in_thread(diarize.diarize, tmp)
+                await concurrency.run_in_thread(diarize.diarize, tmp)
                 log.info("Pyannote warm-up complete.")
             except Exception:
                 log.exception("Pyannote warm-up failed (continuing anyway).")
@@ -826,14 +816,14 @@ async def warmup() -> None:
         ):
             try:
                 from pipeline import gender_ml
-                await run_in_thread(gender_ml.warmup)
+                await concurrency.run_in_thread(gender_ml.warmup)
             except Exception:
                 log.exception("gender_ml warm-up failed; falling back to lazy load.")
         # Local translation model is large (NLLB-200 distilled is ~2.4 GB) and
         # would otherwise load on the first /asr request — well past Bazarr's
         # client timeout. Pre-load it here. Claude backend has nothing to warm.
         if settings.TRANSLATION_BACKEND.strip().lower() == "local":
-            await run_in_thread(translate.warmup)
+            await concurrency.run_in_thread(translate.warmup)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -854,7 +844,7 @@ async def status():
     return JSONResponse(
         {
             "status": "ok",
-            "queue_depth": _jobs_in_system,
+            "queue_depth": concurrency.job_depth(),
             "model_loaded": transcribe.model_loaded(),
         }
     )
@@ -869,12 +859,11 @@ async def asr(
     output: str = Query("srt"),
     encode: bool = Query(True),
 ):
-    global _jobs_in_system
     request_id = uuid.uuid4().hex[:8]
     workdir = Path(tempfile.mkdtemp(prefix=f"asr_{request_id}_"))
     raw_path = workdir / (audio_file.filename or "input")
 
-    _jobs_in_system += 1
+    concurrency.inc_jobs()
     started = time.monotonic()
     try:
         with raw_path.open("wb") as f:
@@ -884,13 +873,13 @@ async def asr(
 
         audio_path = workdir / "audio.wav"
         if encode:
-            await run_in_thread(encode_to_wav, raw_path, audio_path)
+            await concurrency.run_in_thread(encode_to_wav, raw_path, audio_path)
         else:
-            await run_in_thread(prepare_unencoded, raw_path, audio_path)
+            await concurrency.run_in_thread(prepare_unencoded, raw_path, audio_path)
 
         alt_target = None  # initialized for the post-semaphore block
 
-        async with _semaphore:
+        async with concurrency.semaphore:
             # Reclaim cached-but-unused VRAM left by a previous request before
             # touching the GPU. The PyTorch caching allocator does not return
             # memory between requests on its own, and Whisper large-v3 + pyannote
@@ -971,7 +960,7 @@ async def asr(
                 "[%s] %s",
                 request_id, summary.replace("\n", "\n[" + request_id + "] "),
             )
-            await run_in_thread(
+            await concurrency.run_in_thread(
                 _try_save_side_file, target_body, summary, video_file_url,
             )
 
@@ -980,7 +969,7 @@ async def asr(
             # on and the alt pass succeeded.
             if alt_target is not None:
                 alt_body, _ = render(alt_target, output)
-                await run_in_thread(
+                await concurrency.run_in_thread(
                     _try_save_side_file,
                     alt_body, None,    # no summary file for the alt
                     video_file_url,
@@ -995,7 +984,7 @@ async def asr(
                  request_id, wall, len(source_segments))
         return PlainTextResponse(body, media_type=content_type)
     finally:
-        _jobs_in_system -= 1
+        concurrency.dec_jobs()
         shutil.rmtree(workdir, ignore_errors=True)
 
 
