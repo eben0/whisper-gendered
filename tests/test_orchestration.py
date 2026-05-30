@@ -386,7 +386,7 @@ def test_asr_response_is_source_side_file_is_target(monkeypatch):
         captured["body"] = body
         captured["summary"] = summary
         captured["video_file_url"] = video_file_url
-    monkeypatch.setattr(server, "_try_save_side_file", fake_save)
+    monkeypatch.setattr(server.side_file, "_try_save_side_file", fake_save)
 
     client = TestClient(server.app)
     response = client.post(
@@ -540,7 +540,7 @@ def test_asr_skips_side_file_when_target_is_none(monkeypatch):
     save_called = {"hit": False}
     def fake_save(body, summary, video_file_url):
         save_called["hit"] = True
-    monkeypatch.setattr(server, "_try_save_side_file", fake_save)
+    monkeypatch.setattr(server.side_file, "_try_save_side_file", fake_save)
 
     client = TestClient(server.app)
     response = client.post(
@@ -729,7 +729,7 @@ def test_asr_emits_alt_classifier_srt_when_ab_output_enabled(monkeypatch):
     saved: list[tuple[str, str]] = []  # (suffix, body)
     def fake_save(body, summary, video_file_url, suffix=None):
         saved.append((suffix or ".he.srt", body))
-    monkeypatch.setattr(server, "_try_save_side_file", fake_save)
+    monkeypatch.setattr(server.side_file, "_try_save_side_file", fake_save)
 
     client = TestClient(server.app)
     response = client.post(
