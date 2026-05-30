@@ -316,7 +316,6 @@ async def _translate_chunk(
     groups: list[tuple[str | None, list[Segment]]],
     genders: dict[str, str],
     target: str,
-    client,
     sem: asyncio.Semaphore,
     prev_speaker_gender: str | None,
     source_language: str = "English",
@@ -376,8 +375,8 @@ async def _translate_chunk(
                     idx, spk_gender, addressee, len(ctx_snapshot),
                     ctx_snapshot, source_texts,
                 )
-                translated = await backends.translate.translate_batch_async(
-                    source_texts, spk_gender, target, client,
+                translated = await backends.backend.translate_batch_async(
+                    source_texts, spk_gender, target,
                     addressee_gender=addressee,
                     source_language=source_language,
                     previous_context=ctx_snapshot,
@@ -428,7 +427,6 @@ async def _run_gender_aware(
     audio_path: Path,
     segments: list[Segment],
     target: str,
-    client,
     source_language: str = "English",
     precomputed_annotations: list[Any] | None = None,
 ) -> tuple[list[Segment], list[Any]]:
@@ -500,7 +498,7 @@ async def _run_gender_aware(
                     # the gender across the boundary was wrong as often
                     # as it was right. Within-chunk rotation in
                     # ``_translate_chunk`` is unaffected.
-                    idx, groups, genders, target, client, sem,
+                    idx, groups, genders, target, sem,
                     None, source_language,
                     context_window=context_window,
                 )
@@ -519,7 +517,6 @@ async def _run_gender_aware(
 async def _run_plain_translate(
     segments: list[Segment],
     target: str,
-    client,
     source_language: str = "English",
 ) -> list[Segment]:
     chunks = make_chunks(segments, settings.CHUNK_DURATION_SEC)
@@ -540,8 +537,8 @@ async def _run_plain_translate(
                 "PLAIN BATCH ctx_len=%d ctx=%r src=%r",
                 len(ctx_snapshot), ctx_snapshot, source_texts,
             )
-            translated = await backends.translate.translate_batch_async(
-                source_texts, None, target, client,
+            translated = await backends.backend.translate_batch_async(
+                source_texts, None, target,
                 source_language=source_language,
                 previous_context=ctx_snapshot,
             )
@@ -622,21 +619,14 @@ async def run_pipeline_async(
     # convert to a display name for the translation prompts. Falls back to
     # "English" on empty/unknown inputs (the safe pre-feature default).
     source_language = language_name(language)
-    # Only the Claude backend needs an Anthropic client; the local backend
-    # ignores the parameter. Skipping the call also avoids requiring
-    # ANTHROPIC_API_KEY when running fully on-device.
-    if backends.is_local():
-        client = None
-    else:
-        client = backends.get_async_anthropic_client()
     annotations: list[Any] = []
     if settings.is_gender_aware():
         target_segments, annotations = await _run_gender_aware(
-            audio_path, segments, target, client, source_language,
+            audio_path, segments, target, source_language,
         )
     else:
         target_segments = await _run_plain_translate(
-            segments, target, client, source_language,
+            segments, target, source_language,
         )
 
     # Pipeline metrics — pair with the post-transcribe count above.
@@ -729,16 +719,12 @@ async def run_pipeline_alt_classifier(
 
         target = settings.TARGET_LANGUAGE
         source_language = language_name(language)
-        if backends.is_local():
-            client = None
-        else:
-            client = backends.get_async_anthropic_client()
 
         if settings.is_gender_aware():
             # The win: pass precomputed_annotations so _run_gender_aware
             # skips the expensive per-chunk diarize call.
             target_segments, _ = await _run_gender_aware(
-                audio_path, fresh_segments, target, client, source_language,
+                audio_path, fresh_segments, target, source_language,
                 precomputed_annotations=artifacts.annotations,
             )
         else:
@@ -747,7 +733,7 @@ async def run_pipeline_alt_classifier(
             # as the primary. Still translate to keep the contract (caller
             # may rely on a non-None second SRT).
             target_segments = await _run_plain_translate(
-                fresh_segments, target, client, source_language,
+                fresh_segments, target, source_language,
             )
 
         # Reconstruct source from the artifact's raw_segments (which carry
@@ -799,8 +785,7 @@ async def warmup() -> None:
         # Local translation model is large (NLLB-200 distilled is ~2.4 GB) and
         # would otherwise load on the first /asr request — well past Bazarr's
         # client timeout. Pre-load it here. Claude backend has nothing to warm.
-        if backends.is_local():
-            await concurrency.run_in_thread(backends.translate.warmup)
+        await backends.backend.warmup()
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -917,11 +902,7 @@ async def asr(
             # the script-check ratio remains meaningful.
             target_body, _ = render(target_segments, output)
             backend = settings.TRANSLATION_BACKEND
-            backend_model = (
-                settings.LOCAL_TRANSLATION_MODEL
-                if backends.is_local()
-                else settings.CLAUDE_MODEL
-            )
+            backend_model = backends.backend.model_name()
             summary = _build_translation_summary(
                 request_id=request_id,
                 video_file_url=video_file_url,
