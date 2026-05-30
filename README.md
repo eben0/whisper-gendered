@@ -308,10 +308,12 @@ Workload model: ~30 batches, ~1,050 input tokens + ~600 output tokens per batch 
 | Opus 4.8 (35% overhead) | $0.82 | $0.41 | ~$0.74 | **$1.64** |
 | Opus 4.1 (legacy) | $1.82 | $0.91 | ~$1.64 | n/a |
 
-¹ Caching-active column assumes the system prompt qualifies for the cache (≥1024-token minimum on
-Sonnet). The current ~550-token system prompt is **below threshold**, so the cache column is
-theoretical until prompts grow or Anthropic lowers the floor. `cache_control` is already wired in
-`pipeline/translate.py` and no-ops below threshold.
+¹ Caching-active column assumes the system prompt qualifies for the cache. Minimums vary by model:
+**1,024 tokens** on Sonnet 4.x (and legacy Opus 4.0/4.1), **4,096 tokens** on Opus 4.5+ / Haiku 4.5
+/ Mythos. The current ~550-token system prompt is **below threshold on every current model**, so
+the cache column is theoretical until prompts grow or Anthropic lowers the floor. `cache_control`
+(`{"type": "ephemeral", "ttl": "5m"}`) is already wired in `pipeline/translate.py` and no-ops below
+threshold — `cache_read_input_tokens` will report `0` in the API response.
 
 Empirical per-request cost: `grep TRANSLATE_USAGE` in the server log; each batch logs
 `input=…  output=… cache_read=…  cache_creation=…`. Sum across one request to get the actual
