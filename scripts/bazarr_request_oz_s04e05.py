@@ -18,6 +18,11 @@ Reads credentials from ``.env.auth`` in the project root:
     BAZARR_API_KEY
     BAZARR_BASE_URL              # e.g. https://bazarr.example.com
     BAZARR_EPISODE_ID            # Bazarr's internal episode id for OZ S04E05
+    AUTHENTIK_COOKIE             # (optional) full ``Cookie:`` header value
+                                 # grabbed from browser DevTools after login.
+                                 # Needed when the Authentik outpost is in
+                                 # cookie-session mode and Bearer alone is
+                                 # not enough (302 → /application/o/authorize).
 
 Usage:
     .\\.venv\\Scripts\\python.exe scripts\\bazarr_request_oz_s04e05.py
@@ -159,11 +164,28 @@ def authenticate(*, force_refresh: bool = False) -> str:
 
 
 def _bazarr_headers(access_token: str) -> dict[str, str]:
-    return {
+    """Headers for a Bazarr API call.
+
+    Three layers of auth — all three are usually required when Bazarr sits
+    behind Traefik + an Authentik outpost in cookie-session mode:
+
+    * ``Authorization: Bearer <oauth_token>`` — Authentik token (some
+      configurations accept it; most outposts also want a session cookie).
+    * ``Cookie: authentik_proxy_...`` (optional, via ``AUTHENTIK_COOKIE``) —
+      the session the Authentik outpost actually checks. Grab from your
+      browser DevTools after logging in; expires per the outpost's session
+      lifetime so refresh when 302s come back.
+    * ``X-API-KEY: <bazarr_api_key>`` — Bazarr's own API gate.
+    """
+    headers = {
         "Authorization": f"Bearer {access_token}",
         "X-API-KEY": _env("BAZARR_API_KEY"),
         "Accept": "application/json",
     }
+    cookie = os.getenv("AUTHENTIK_COOKIE")
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
 
 
 def find_episode(access_token: str) -> None:
