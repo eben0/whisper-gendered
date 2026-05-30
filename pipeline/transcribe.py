@@ -9,24 +9,17 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass
 from pathlib import Path
 
 from faster_whisper import WhisperModel
 
 from config import settings
+from pipeline.segment import Segment  # re-export: keeps pipeline.transcribe.Segment valid
 
 log = logging.getLogger("pipeline.transcribe")
 
 _model: WhisperModel | None = None
 _lock = threading.Lock()
-
-
-@dataclass
-class Segment:
-    start: float
-    end: float
-    text: str
 
 
 def get_model() -> WhisperModel:

@@ -17,7 +17,7 @@ from pyannote.audio import Pipeline
 from pyannote.core import Annotation
 
 from config import settings
-from pipeline.transcribe import Segment
+from pipeline.segment import Segment
 
 log = logging.getLogger("pipeline.diarize")
 

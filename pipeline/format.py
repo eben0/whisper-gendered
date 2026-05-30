@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 
-from pipeline.transcribe import Segment
+from pipeline.segment import Segment
 
 
 # --- Subtitle styling constants ------------------------------------------ #
