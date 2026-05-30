@@ -272,6 +272,51 @@ pipeline/
 run.ps1              PowerShell launcher (prints LAN IP)
 ```
 
+## Claude API cost reference
+
+Pricing fetched from [Anthropic's docs](https://platform.claude.com/docs/en/about-claude/pricing)
+on **2026-05-30**. Re-check before using these for capacity planning — Anthropic ships price changes.
+
+### Per-model $/MTok
+
+| Model | Base input | Cache hit (0.1×) | 5-min cache write (1.25×) | 1-hr cache write (2×) | Output | Batch API (50%) | Fast mode |
+|---|---|---|---|---|---|---|---|
+| Opus 4.8 | $5 | $0.50 | $6.25 | $10 | $25 | $2.50 / $12.50 | **$10 / $50** |
+| Opus 4.7 | $5 | $0.50 | $6.25 | $10 | $25 | $2.50 / $12.50 | $30 / $150 |
+| Opus 4.6 | $5 | $0.50 | $6.25 | $10 | $25 | $2.50 / $12.50 | $30 / $150 |
+| Opus 4.5 | $5 | $0.50 | $6.25 | $10 | $25 | $2.50 / $12.50 | — |
+| Opus 4.1 (legacy) | $15 | $1.50 | $18.75 | $30 | $75 | $7.50 / $37.50 | — |
+| **Sonnet 4.6** (default) | $3 | $0.30 | $3.75 | $6 | $15 | $1.50 / $7.50 | — |
+| Sonnet 4.5 | $3 | $0.30 | $3.75 | $6 | $15 | $1.50 / $7.50 | — |
+| Haiku 4.5 | $1 | $0.10 | $1.25 | $2 | $5 | $0.50 / $2.50 | — |
+
+Cache discount is always 10% of base input on reads, 125% on 5-min writes, 200% on 1-hr writes —
+across every model. **Opus 4.7+ use a new tokenizer** that can spend up to **35% more tokens** on
+the same text, so per-episode cost on Opus 4.7/4.8 carries a hidden ~1.35× multiplier vs Sonnet.
+
+### Estimated cost per ~1h gender-aware Hebrew episode
+
+Workload model: ~30 batches, ~1,050 input tokens + ~600 output tokens per batch →
+**~31.5k input + ~18k output per episode** (derived from Oz S04E05 batch math).
+
+| Model | Standard | Batch API | With caching¹ | Fast mode |
+|---|---|---|---|---|
+| **Sonnet 4.6** (default) | **$0.36** | $0.18 | ~$0.32 | n/a |
+| Haiku 4.5 | $0.12 | $0.06 | ~$0.11 | n/a |
+| Opus 4.6 | $0.61 | $0.31 | ~$0.55 | $3.65 |
+| Opus 4.7 (35% tokenizer overhead) | $0.82 | $0.41 | ~$0.74 | $4.92 |
+| Opus 4.8 (35% overhead) | $0.82 | $0.41 | ~$0.74 | **$1.64** |
+| Opus 4.1 (legacy) | $1.82 | $0.91 | ~$1.64 | n/a |
+
+¹ Caching-active column assumes the system prompt qualifies for the cache (≥1024-token minimum on
+Sonnet). The current ~550-token system prompt is **below threshold**, so the cache column is
+theoretical until prompts grow or Anthropic lowers the floor. `cache_control` is already wired in
+`pipeline/translate.py` and no-ops below threshold.
+
+Empirical per-request cost: `grep TRANSLATE_USAGE` in the server log; each batch logs
+`input=…  output=… cache_read=…  cache_creation=…`. Sum across one request to get the actual
+token count; multiply by the rates above.
+
 ## Notes
 
 - Models load lazily on first request and are reused across requests (never reloaded per call).
