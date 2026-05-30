@@ -12,31 +12,26 @@ by an asyncio.Semaphore sized to CONCURRENT_JOBS — the event loop never blocks
 
 from __future__ import annotations
 
+from core import cuda; cuda.bootstrap()
+from core.logging_config import configure; configure()
+
 import logging
-import os
 import shutil
-import sys
 import tempfile
 import time
 import uuid
 from pathlib import Path
 
-from core import audio, backends, concurrency, cuda, lifecycle, orchestrator, side_file
-cuda.bootstrap()
-
 from fastapi import FastAPI, File, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from config import settings
+from core import audio, backends, concurrency, lifecycle, orchestrator, side_file
 from core.artifacts import PipelineArtifacts
-from pipeline import diarize, gender, transcribe
+from pipeline import transcribe
 from pipeline.format import render
 from pipeline.lang import language_name
-from pipeline.transcribe import Segment
 
-from core.logging_config import configure as _configure_logging
-
-_configure_logging()
 log = logging.getLogger("server")
 
 VERSION = "1.0.0"
