@@ -130,10 +130,17 @@ def _save_cached_token(token: str, expires_in: int) -> None:
     _TOKEN_CACHE.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def authenticate(*, force_refresh: bool = False) -> str:
+def authenticate(client: httpx.Client, *, force_refresh: bool = False) -> str:
     """Authentik OAuth 2.0 password grant. Client auth is in the request body
     (per the Authentik client config). Returns the access token. Reuses a
     cached token from ``.cache/bazarr_oauth_token.json`` if non-expired.
+
+    The HTTP call goes through the supplied ``httpx.Client``, so any
+    ``Set-Cookie`` returned by the Authentik token endpoint (e.g. an
+    ``authentik_proxy_*`` session cookie with ``Domain=eben0.com``) gets
+    stored in the client's cookie jar and auto-forwarded to subsequent
+    Bazarr calls. That's the cheapest way to satisfy the outpost without
+    manually pasting a browser cookie.
     """
     if not force_refresh:
         cached = _load_cached_token()
@@ -147,7 +154,7 @@ def authenticate(*, force_refresh: bool = False) -> str:
         "username": _env("OAUTH_USERNAME"),
         "password": _env("OAUTH_PASSWORD"),
     }
-    r = httpx.post(token_url, data=body, timeout=30.0)
+    r = client.post(token_url, data=body, timeout=30.0)
     if r.status_code != 200:
         sys.exit(f"OAuth failed: {r.status_code} {_redact(r.text[:500])}")
     data = r.json()
@@ -157,6 +164,17 @@ def authenticate(*, force_refresh: bool = False) -> str:
     # ``expires_in`` is seconds-from-now per RFC 6749 §5.1.
     expires_in = int(data.get("expires_in", 3600))
     _save_cached_token(token, expires_in)
+    # Log captured cookie names (not values) so the user can see whether
+    # Authentik handed us session cookies we can forward to Bazarr.
+    captured = list(client.cookies.keys())
+    if captured:
+        _safe_print(f"✓ OAuth response set cookies: {captured}")
+    else:
+        _safe_print(
+            "⚠ OAuth response did not set any cookies — the Authentik "
+            "outpost will likely reject the Bazarr call unless you also "
+            "set AUTHENTIK_COOKIE in .env.auth."
+        )
     return token
 
 
@@ -188,9 +206,8 @@ def _bazarr_headers(access_token: str) -> dict[str, str]:
     return headers
 
 
-def _get_json(url: str, access_token: str) -> dict:
-    r = httpx.get(url, headers=_bazarr_headers(access_token), timeout=30.0,
-                  follow_redirects=True)
+def _get_json(client: httpx.Client, url: str, access_token: str) -> dict:
+    r = client.get(url, headers=_bazarr_headers(access_token), timeout=30.0)
     _safe_print(f"GET {url} → {r.status_code}")
     if r.status_code != 200:
         sys.exit(_redact(r.text[:500]))
@@ -207,10 +224,12 @@ def _get_json(url: str, access_token: str) -> dict:
     return r.json()
 
 
-def list_episodes(access_token: str, series_id: int) -> list[dict]:
+def list_episodes(
+    client: httpx.Client, access_token: str, series_id: int,
+) -> list[dict]:
     base = _env("BAZARR_BASE_URL").rstrip("/")
     url = f"{base}/api/episodes?seriesid[]={series_id}"
-    return _get_json(url, access_token).get("data", [])
+    return _get_json(client, url, access_token).get("data", [])
 
 
 def _ep_id(ep: dict) -> int | None:
@@ -230,10 +249,11 @@ def print_episodes(eps: list[dict]) -> None:
 
 
 def resolve_episode_id(
-    access_token: str, series_id: int, season: int, episode: int,
+    client: httpx.Client, access_token: str,
+    series_id: int, season: int, episode: int,
 ) -> int:
     """Find the Bazarr/Sonarr episode id for ``series:season:episode``."""
-    for ep in list_episodes(access_token, series_id):
+    for ep in list_episodes(client, access_token, series_id):
         if ep.get("season") == season and ep.get("episode") == episode:
             ep_id = _ep_id(ep)
             if ep_id is not None:
@@ -243,7 +263,9 @@ def resolve_episode_id(
     )
 
 
-def trigger_search(access_token: str, episode_id: int) -> None:
+def trigger_search(
+    client: httpx.Client, access_token: str, episode_id: int,
+) -> None:
     """Ask Bazarr to download a subtitle for the given episode id.
 
     Hits Bazarr's manual-search-and-download path:
@@ -254,8 +276,7 @@ def trigger_search(access_token: str, episode_id: int) -> None:
     """
     base = _env("BAZARR_BASE_URL").rstrip("/")
     url = f"{base}/api/providers/episodes?episodeid={episode_id}"
-    r = httpx.post(url, headers=_bazarr_headers(access_token), timeout=30.0,
-                   follow_redirects=True)
+    r = client.post(url, headers=_bazarr_headers(access_token), timeout=30.0)
     _safe_print(f"POST {url} → {r.status_code}")
     if r.status_code >= 400:
         _safe_print(_redact(r.text[:1000]))
@@ -309,34 +330,42 @@ def main() -> None:
     args = parser.parse_args()
 
     _load_env()
-    access_token = authenticate(force_refresh=args.force_refresh_token)
-    _safe_print(f"✓ OAuth ok  (token length={len(access_token)})")
-
-    if args.dry_run:
-        return
-
-    if args.list_episodes:
-        if args.series_id is None:
-            sys.exit("--list-episodes requires --series-id.")
-        print_episodes(list_episodes(access_token, args.series_id))
-        return
-
-    if args.episode_id is not None:
-        trigger_search(access_token, args.episode_id)
-        return
-
-    if (args.series_id is not None
-            and args.season is not None
-            and args.episode is not None):
-        ep_id = resolve_episode_id(
-            access_token, args.series_id, args.season, args.episode,
+    # Single shared client: cookies set by the OAuth response (Authentik)
+    # auto-forward to Bazarr requests when their domains share the parent
+    # (e.g. ``Domain=eben0.com``). ``follow_redirects=True`` so 302s through
+    # the outpost don't trip us up.
+    with httpx.Client(follow_redirects=True) as client:
+        access_token = authenticate(
+            client, force_refresh=args.force_refresh_token,
         )
-        _safe_print(
-            f"resolved series={args.series_id} "
-            f"S{args.season:02d}E{args.episode:02d} → episode id {ep_id}"
-        )
-        trigger_search(access_token, ep_id)
-        return
+        _safe_print(f"✓ OAuth ok  (token length={len(access_token)})")
+
+        if args.dry_run:
+            return
+
+        if args.list_episodes:
+            if args.series_id is None:
+                sys.exit("--list-episodes requires --series-id.")
+            print_episodes(list_episodes(client, access_token, args.series_id))
+            return
+
+        if args.episode_id is not None:
+            trigger_search(client, access_token, args.episode_id)
+            return
+
+        if (args.series_id is not None
+                and args.season is not None
+                and args.episode is not None):
+            ep_id = resolve_episode_id(
+                client, access_token,
+                args.series_id, args.season, args.episode,
+            )
+            _safe_print(
+                f"resolved series={args.series_id} "
+                f"S{args.season:02d}E{args.episode:02d} → episode id {ep_id}"
+            )
+            trigger_search(client, access_token, ep_id)
+            return
 
     sys.exit(
         "Need one of: --dry-run | --list-episodes --series-id N | "
