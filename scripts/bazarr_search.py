@@ -257,9 +257,22 @@ def trigger_search(access_token: str, episode_id: int) -> None:
     r = httpx.post(url, headers=_bazarr_headers(access_token), timeout=30.0,
                    follow_redirects=True)
     _safe_print(f"POST {url} → {r.status_code}")
-    _safe_print(_redact(r.text[:1000]))
     if r.status_code >= 400:
+        _safe_print(_redact(r.text[:1000]))
         sys.exit(f"Bazarr request failed (HTTP {r.status_code}).")
+    ctype = r.headers.get("content-type", "").lower()
+    if "json" not in ctype:
+        # A 200 with HTML almost always means the Authentik outpost served
+        # its landing/login page — the POST never reached Bazarr. Failing
+        # loudly is safer than pretending the search triggered.
+        _safe_print(
+            f"⚠ POST returned 200 but content-type={ctype!r} (not JSON). "
+            f"The request likely never reached Bazarr — set AUTHENTIK_COOKIE "
+            f"in .env.auth (full Cookie: header value from browser DevTools)."
+        )
+        _safe_print(_redact(r.text[:400]))
+        sys.exit(2)
+    _safe_print(_redact(r.text[:1000]))
 
 
 # ----- entrypoint --------------------------------------------------------- #
