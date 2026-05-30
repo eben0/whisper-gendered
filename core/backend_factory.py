@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from config import settings
+from core.backend_base import TranslationBackend
 from core.backend_claude import ClaudeBackend
 from core.backend_local import LocalBackend
 
@@ -10,7 +11,7 @@ CLAUDE = "claude"
 LOCAL = "local"
 
 
-def create_backend() -> ClaudeBackend | LocalBackend:
+def create_backend() -> TranslationBackend:
     """Instantiate the backend named by ``settings.TRANSLATION_BACKEND``.
 
     Raises ``ValueError`` for unrecognised backend names so misconfiguration
@@ -29,4 +30,4 @@ def create_backend() -> ClaudeBackend | LocalBackend:
 
 
 # Module-level singleton — resolved once at import time from current settings.
-backend: ClaudeBackend | LocalBackend = create_backend()
+backend: TranslationBackend = create_backend()

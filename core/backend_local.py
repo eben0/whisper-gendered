@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import logging
 
+from core.backend_base import TranslationBackend
+
 log = logging.getLogger("core.backend_local")
 
 
-class LocalBackend:
+class LocalBackend(TranslationBackend):
     """Translation backend using a local HuggingFace model on the same GPU."""
+
+    _backend_type = "local"
 
     async def translate_batch_async(self, texts, gender, target, **kwargs):
         from pipeline import translate_local

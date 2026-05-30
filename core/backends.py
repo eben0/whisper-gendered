@@ -7,13 +7,8 @@ This module re-exports what the rest of the codebase needs for backward compat.
 
 from __future__ import annotations
 
-from config import settings
+from core.backend_base import TranslationBackend
 from core.backend_factory import backend, create_backend, CLAUDE, LOCAL
 
-# Re-export the singleton for callers that import from core.backends
-__all__ = ["backend", "create_backend", "is_local", "LOCAL", "CLAUDE"]
-
-
-def is_local() -> bool:
-    """True when the configured translation backend is the on-device model."""
-    return settings.TRANSLATION_BACKEND.strip().lower() == LOCAL
+# Re-export the singleton and type for callers that import from core.backends
+__all__ = ["backend", "create_backend", "LOCAL", "CLAUDE", "TranslationBackend"]

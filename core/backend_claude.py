@@ -5,12 +5,15 @@ from __future__ import annotations
 import logging
 
 from config import settings
+from core.backend_base import TranslationBackend
 
 log = logging.getLogger("core.backend_claude")
 
 
-class ClaudeBackend:
+class ClaudeBackend(TranslationBackend):
     """Translation backend that calls the Anthropic API via pipeline.translate."""
+
+    _backend_type = "claude"
 
     def __init__(self) -> None:
         self._client = None
