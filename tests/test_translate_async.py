@@ -108,7 +108,13 @@ class _RecordingMessages:
         self.payloads: list[dict] = []
 
     async def create(self, **kwargs):
-        self.systems.append(kwargs.get("system", ""))
+        # ``system`` may be a plain string (legacy) or a list of content
+        # blocks (when cache_control is attached). Normalize to a string so
+        # tests can keep using simple substring assertions.
+        system = kwargs.get("system", "")
+        if isinstance(system, list):
+            system = "".join(b.get("text", "") for b in system if isinstance(b, dict))
+        self.systems.append(system)
         self.payloads.append(kwargs)
         text = self._payloads[self.calls]
         self.calls += 1

@@ -173,6 +173,59 @@ def _chunks(texts: list[str]) -> list[list[str]]:
     return batches
 
 
+def _system_blocks(
+    target_language: str,
+    gender: str | None,
+    addressee_gender: str | None,
+    source_language: str,
+) -> list[dict]:
+    """Wrap the system prompt as a single cacheable content block.
+
+    Setting ``cache_control`` on the system block opts this request into
+    Anthropic prompt caching: subsequent calls within the cache TTL that
+    share the same system prompt skip re-encoding it on the input side
+    (~90% input-token discount on the cached portion). All batches inside
+    one ``/asr`` request use the same system prompt — same target language,
+    same speaker gender, same addressee gender — so the first batch primes
+    the cache and the rest hit it.
+
+    Caveat: caching requires the cached prefix to exceed a model-specific
+    minimum (currently 1024 tokens for Sonnet). Our gender-aware Hebrew
+    system prompt is ~550 tokens, so the API may silently fall back to
+    non-cached behaviour today. Leaving ``cache_control`` in place is
+    forward-compatible: if/when prompts grow past the threshold or
+    Anthropic lowers it, caching kicks in automatically.
+    """
+    return [{
+        "type": "text",
+        "text": _system_prompt(target_language, gender, addressee_gender, source_language),
+        "cache_control": {"type": "ephemeral"},
+    }]
+
+
+def _log_usage(response, batch_size: int) -> None:
+    """Emit one grep-friendly INFO line per Claude call with token counts.
+
+    Logs raw counts only — pricing varies by model and changes over time, so
+    cost math stays out of code. Grep ``TRANSLATE_USAGE`` to sum a request's
+    totals; ``cache_read`` / ``cache_creation`` are 0 today (we don't pass
+    ``cache_control`` yet) but populated automatically if/when we enable
+    prompt caching, so the line format won't change later.
+    """
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    log.info(
+        "TRANSLATE_USAGE model=%s batch=%d input=%d output=%d cache_read=%d cache_creation=%d",
+        settings.CLAUDE_MODEL,
+        batch_size,
+        getattr(usage, "input_tokens", 0) or 0,
+        getattr(usage, "output_tokens", 0) or 0,
+        getattr(usage, "cache_read_input_tokens", 0) or 0,
+        getattr(usage, "cache_creation_input_tokens", 0) or 0,
+    )
+
+
 def _translate_one_batch(
     texts: list[str],
     gender: str | None,
@@ -189,10 +242,11 @@ def _translate_one_batch(
     response = client.messages.create(
         model=settings.CLAUDE_MODEL,
         max_tokens=MAX_TOKENS,
-        system=_system_prompt(target_language, gender, addressee_gender, source_language),
+        system=_system_blocks(target_language, gender, addressee_gender, source_language),
         output_config={"format": _OUTPUT_FORMAT},
         messages=[{"role": "user", "content": numbered}],
     )
+    _log_usage(response, len(texts))
     raw = next((b.text for b in response.content if b.type == "text"), "")
     try:
         translations = json.loads(raw).get("translations", [])
@@ -260,10 +314,11 @@ async def _translate_one_batch_async(
     response = await client.messages.create(
         model=settings.CLAUDE_MODEL,
         max_tokens=MAX_TOKENS,
-        system=_system_prompt(target_language, gender, addressee_gender, source_language),
+        system=_system_blocks(target_language, gender, addressee_gender, source_language),
         output_config={"format": _OUTPUT_FORMAT},
         messages=[{"role": "user", "content": numbered}],
     )
+    _log_usage(response, len(texts))
     raw = next((b.text for b in response.content if b.type == "text"), "")
     try:
         translations = json.loads(raw).get("translations", [])
