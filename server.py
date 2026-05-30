@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from core import concurrency, cuda
+from core import backends, concurrency, cuda
 cuda.bootstrap()
 
 import numpy as np
@@ -35,15 +35,6 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from config import settings
 from pipeline import diarize, gender, transcribe
-# Backend factory: at import time, ``translate`` points at the module whose
-# ``translate_batch_async`` matches the requested TRANSLATION_BACKEND. Both
-# modules expose the same call signature, so the orchestrator's call site at
-# ``translate.translate_batch_async(...)`` is unchanged either way.
-# ``client`` is ignored by the local backend; the Claude backend uses it.
-if settings.TRANSLATION_BACKEND.strip().lower() == "local":
-    from pipeline import translate_local as translate  # type: ignore[no-redef]
-else:
-    from pipeline import translate  # type: ignore[no-redef]
 from pipeline.chunk import make_chunks
 from pipeline.format import render
 from pipeline.lang import language_name, target_script_ratio
@@ -57,20 +48,6 @@ log = logging.getLogger("server")
 VERSION = "1.0.0"
 
 app = FastAPI(title="Gender-Aware Hebrew Subtitle Server", version=VERSION)
-
-
-_async_anthropic_client = None
-
-
-def get_async_anthropic_client():
-    global _async_anthropic_client
-    if _async_anthropic_client is None:
-        import anthropic
-        _async_anthropic_client = anthropic.AsyncAnthropic(
-            api_key=settings.require_anthropic_key(),
-            max_retries=settings.CLAUDE_MAX_RETRIES,
-        )
-    return _async_anthropic_client
 
 
 # --------------------------------------------------------------------------- #
@@ -399,7 +376,7 @@ async def _translate_chunk(
                     idx, spk_gender, addressee, len(ctx_snapshot),
                     ctx_snapshot, source_texts,
                 )
-                translated = await translate.translate_batch_async(
+                translated = await backends.translate.translate_batch_async(
                     source_texts, spk_gender, target, client,
                     addressee_gender=addressee,
                     source_language=source_language,
@@ -563,7 +540,7 @@ async def _run_plain_translate(
                 "PLAIN BATCH ctx_len=%d ctx=%r src=%r",
                 len(ctx_snapshot), ctx_snapshot, source_texts,
             )
-            translated = await translate.translate_batch_async(
+            translated = await backends.translate.translate_batch_async(
                 source_texts, None, target, client,
                 source_language=source_language,
                 previous_context=ctx_snapshot,
@@ -648,10 +625,10 @@ async def run_pipeline_async(
     # Only the Claude backend needs an Anthropic client; the local backend
     # ignores the parameter. Skipping the call also avoids requiring
     # ANTHROPIC_API_KEY when running fully on-device.
-    if settings.TRANSLATION_BACKEND.strip().lower() == "local":
+    if backends.is_local():
         client = None
     else:
-        client = get_async_anthropic_client()
+        client = backends.get_async_anthropic_client()
     annotations: list[Any] = []
     if settings.is_gender_aware():
         target_segments, annotations = await _run_gender_aware(
@@ -752,10 +729,10 @@ async def run_pipeline_alt_classifier(
 
         target = settings.TARGET_LANGUAGE
         source_language = language_name(language)
-        if settings.TRANSLATION_BACKEND.strip().lower() == "local":
+        if backends.is_local():
             client = None
         else:
-            client = get_async_anthropic_client()
+            client = backends.get_async_anthropic_client()
 
         if settings.is_gender_aware():
             # The win: pass precomputed_annotations so _run_gender_aware
@@ -822,8 +799,8 @@ async def warmup() -> None:
         # Local translation model is large (NLLB-200 distilled is ~2.4 GB) and
         # would otherwise load on the first /asr request — well past Bazarr's
         # client timeout. Pre-load it here. Claude backend has nothing to warm.
-        if settings.TRANSLATION_BACKEND.strip().lower() == "local":
-            await concurrency.run_in_thread(translate.warmup)
+        if backends.is_local():
+            await concurrency.run_in_thread(backends.translate.warmup)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -942,7 +919,7 @@ async def asr(
             backend = settings.TRANSLATION_BACKEND
             backend_model = (
                 settings.LOCAL_TRANSLATION_MODEL
-                if backend.strip().lower() == "local"
+                if backends.is_local()
                 else settings.CLAUDE_MODEL
             )
             summary = _build_translation_summary(

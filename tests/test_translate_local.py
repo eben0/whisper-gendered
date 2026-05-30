@@ -351,21 +351,22 @@ async def test_smoke_opus_mt_en_he_produces_hebrew(monkeypatch):
 # ---------------------------------------------------------------------------- #
 
 def test_default_backend_resolves_to_claude_module(monkeypatch):
-    # When TRANSLATION_BACKEND=claude, importing server binds ``server.translate``
-    # to pipeline.translate. This guards against a future refactor accidentally
-    # flipping the resolution. We force the env var to "claude" rather than
-    # unsetting it, because load_dotenv() in config.py would otherwise repopulate
-    # the dev's local .env override (e.g. TRANSLATION_BACKEND=local).
+    # When TRANSLATION_BACKEND=claude, importing core.backends binds
+    # ``backends.translate`` to pipeline.translate. This guards against a
+    # future refactor accidentally flipping the resolution. We force the env
+    # var to "claude" rather than unsetting it, because load_dotenv() in
+    # config.py would otherwise repopulate the dev's local .env override
+    # (e.g. TRANSLATION_BACKEND=local).
     import importlib
+    import core.backends as backends_module
     monkeypatch.setenv("TRANSLATION_BACKEND", "claude")
     import config
     importlib.reload(config)
     assert config.settings.TRANSLATION_BACKEND == "claude"
-    import server
-    importlib.reload(server)
-    assert server.translate.__name__ == "pipeline.translate", (
+    importlib.reload(backends_module)
+    assert backends_module.translate.__name__ == "pipeline.translate", (
         f"Claude backend should resolve to pipeline.translate; got "
-        f"{server.translate.__name__}."
+        f"{backends_module.translate.__name__}."
     )
 
 
