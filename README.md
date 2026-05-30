@@ -294,19 +294,39 @@ Cache discount is always 10% of base input on reads, 125% on 5-min writes, 200% 
 across every model. **Opus 4.7+ use a new tokenizer** that can spend up to **35% more tokens** on
 the same text, so per-episode cost on Opus 4.7/4.8 carries a hidden ~1.35× multiplier vs Sonnet.
 
-### Estimated cost per ~1h gender-aware Hebrew episode
+### Cost per ~1h gender-aware Hebrew episode
 
-Workload model: ~30 batches, ~1,050 input tokens + ~600 output tokens per batch →
-**~31.5k input + ~18k output per episode** (derived from Oz S04E05 batch math).
+**Empirical anchor** — Oz S04E05 on 2026-05-30, Opus 4.8, **single translation
+path** (no A/B alt-classifier): ~215 Claude calls, **~254k input + ~18k output
+tokens per episode → $1.73**.
+
+The per-episode token count is much larger than a naive "30 batches × 30 lines"
+estimate would suggest. The chunked pipeline + per-speaker grouping creates
+many small batches (~4–5 lines/batch on average for a dialogue-heavy show),
+and each batch carries the full system prompt + previous-context window. So
+input cost scales with the **number of batches**, not just the number of
+source segments.
 
 | Model | Standard | Batch API | With caching¹ | Fast mode |
 |---|---|---|---|---|
-| **Sonnet 4.6** (default) | **$0.36** | $0.18 | ~$0.32 | n/a |
-| Haiku 4.5 | $0.12 | $0.06 | ~$0.11 | n/a |
-| Opus 4.6 | $0.61 | $0.31 | ~$0.55 | $3.65 |
-| Opus 4.7 (35% tokenizer overhead) | $0.82 | $0.41 | ~$0.74 | $4.92 |
-| Opus 4.8 (35% overhead) | $0.82 | $0.41 | ~$0.74 | **$1.64** |
-| Opus 4.1 (legacy) | $1.82 | $0.91 | ~$1.64 | n/a |
+| Haiku 4.5 | $0.34 | $0.17 | ~$0.32 | n/a |
+| **Sonnet 4.6** | **$1.03**² | $0.51 | ~$0.93 | n/a |
+| Opus 4.6 | $1.72² | $0.86 | ~$1.55 | $10.30 |
+| Opus 4.7 | $1.73 | $0.86 | ~$1.56 | $10.38 |
+| **Opus 4.8** (measured) | **$1.73** | $0.86 | ~$1.56 | **$3.45** |
+| Opus 4.1 (legacy) | $5.16 | $2.58 | ~$4.65 | n/a |
+
+¹ See cache caveat below.
+² Sonnet and Opus 4.6 use the older tokenizer (~26% leaner than Opus 4.7+);
+actual cost on those models will be **~25% lower** than the table shows.
+The numbers above use the empirical token counts from the Opus 4.8 run as
+the workload model — a single A/B comparison run between Sonnet and Opus 4.8
+on the same episode would replace this estimate with a hard number.
+
+**A/B alt-classifier doubles cost** — when the gender A/B compare path is on,
+each episode runs through Claude **twice** (primary + alt-classifier output
+SRTs). Disable via `GENDER_AB_OUTPUT=false` once the gender classifier
+choice is settled.
 
 ¹ Caching-active column assumes the system prompt qualifies for the cache. Minimums vary by model:
 **1,024 tokens** on Sonnet 4.x (and legacy Opus 4.0/4.1), **4,096 tokens** on Opus 4.5+ / Haiku 4.5
