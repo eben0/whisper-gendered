@@ -120,14 +120,44 @@ def _load_cached_token() -> str | None:
     return token if isinstance(token, str) and token else None
 
 
-def _save_cached_token(token: str, expires_in: int) -> None:
-    """Persist the access token + computed expiry. Refresh `_REFRESH_LEEWAY_SECONDS`
-    before actual expiry to avoid races where a token expires mid-request.
+def _save_cached_token(
+    token: str, expires_in: int, cookie_header: str = "",
+) -> None:
+    """Persist the access token + (optional) cookie header + computed expiry.
+    Refresh ``_REFRESH_LEEWAY_SECONDS`` before actual expiry to avoid races
+    where a token expires mid-request.
+
+    ``cookie_header`` is the serialized ``name=value; name=value; …`` form
+    of whatever cookies the OAuth response set. Stored verbatim so a later
+    invocation can attach it to Bazarr requests without re-doing OAuth.
     """
     _TOKEN_CACHE.parent.mkdir(parents=True, exist_ok=True)
     expires_at = time.time() + max(0, expires_in - _REFRESH_LEEWAY_SECONDS)
-    payload = {"access_token": token, "expires_at": expires_at}
+    payload = {
+        "access_token": token,
+        "expires_at": expires_at,
+        "cookie_header": cookie_header,
+    }
     _TOKEN_CACHE.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _load_cached_cookie() -> str | None:
+    """Return the cookie header persisted alongside the access token, or
+    None if the cache is missing/stale or no cookies were captured."""
+    if not _TOKEN_CACHE.exists():
+        return None
+    try:
+        data = json.loads(_TOKEN_CACHE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    # Tie cookie lifetime to the token's — if the token's expired we should
+    # consider the session stale too (cookies often outlive tokens but
+    # being conservative avoids stale-session bugs).
+    expires_at = float(data.get("expires_at", 0))
+    if time.time() >= expires_at:
+        return None
+    val = data.get("cookie_header")
+    return val if isinstance(val, str) and val else None
 
 
 def authenticate(client: httpx.Client, *, force_refresh: bool = False) -> str:
@@ -163,12 +193,16 @@ def authenticate(client: httpx.Client, *, force_refresh: bool = False) -> str:
     token: str = data["access_token"]
     # ``expires_in`` is seconds-from-now per RFC 6749 §5.1.
     expires_in = int(data.get("expires_in", 3600))
-    _save_cached_token(token, expires_in)
-    # Log captured cookie names (not values) so the user can see whether
-    # Authentik handed us session cookies we can forward to Bazarr.
+    # Capture cookies set by the OAuth response so later invocations can
+    # reuse them without re-doing OAuth (and without manually pasting
+    # AUTHENTIK_COOKIE). Serialize to a verbatim ``Cookie:`` header value.
+    cookie_header = "; ".join(
+        f"{name}={value}" for name, value in client.cookies.items()
+    )
+    _save_cached_token(token, expires_in, cookie_header=cookie_header)
     captured = list(client.cookies.keys())
     if captured:
-        _safe_print(f"✓ OAuth response set cookies: {captured}")
+        _safe_print(f"✓ OAuth response set cookies: {captured} (cached)")
     else:
         _safe_print(
             "⚠ OAuth response did not set any cookies — the Authentik "
@@ -200,7 +234,10 @@ def _bazarr_headers(access_token: str) -> dict[str, str]:
         "X-API-KEY": _env("BAZARR_API_KEY"),
         "Accept": "application/json",
     }
-    cookie = os.getenv("AUTHENTIK_COOKIE")
+    # Prefer the OAuth-captured cookies persisted alongside the token;
+    # fall back to AUTHENTIK_COOKIE in .env.auth for outposts whose token
+    # endpoint doesn't set cookies (the manual-paste path).
+    cookie = _load_cached_cookie() or os.getenv("AUTHENTIK_COOKIE")
     if cookie:
         headers["Cookie"] = cookie
     return headers
