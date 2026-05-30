@@ -310,35 +310,74 @@ def resolve_episode_id(
 
 
 def trigger_search(
-    client: httpx.Client, access_token: str, episode_id: int,
+    client: httpx.Client, access_token: str,
+    series_id: int, episode_id: int,
+    *, provider: str = "whisperai", language: str = "he",
 ) -> None:
-    """Ask Bazarr to download a subtitle for the given episode id.
+    """Two-step manual-search-and-download against Bazarr's provider API.
 
-    Hits Bazarr's manual-search-and-download path:
-      POST /api/providers/episodes?episodeid=<id>
+    1. ``GET /api/providers/episodes?seriesid=…&episodeid=…&language=…``
+       returns the list of provider results (each is a dict with
+       ``provider``, ``subtitle`` id, ``language``, etc.). For our
+       whisperai provider this returns one row per language it can
+       transcribe to.
+    2. ``POST /api/providers/episodes`` with ``provider``, ``subtitle``,
+       and the required flags downloads that specific result — for
+       whisperai this is what actually fires the whisper-gend ASR.
 
-    This triggers an immediate search across enabled providers (whisperai
-    among them). The Whisper provider then POSTs to our whisper-gend ASR.
+    Bazarr's web UI does the same two steps when you click "Search
+    Subtitle" then "Use this".
     """
     base = _env("BAZARR_BASE_URL").rstrip("/")
-    url = f"{base}/api/providers/episodes?episodeid={episode_id}"
-    r = client.post(url, headers=_bazarr_headers(access_token), timeout=30.0)
-    _safe_print(f"POST {url} → {r.status_code}")
+
+    # Step 1: enumerate provider results for this episode + language.
+    search_url = (f"{base}/api/providers/episodes"
+                  f"?seriesid={series_id}&episodeid={episode_id}"
+                  f"&language={language}")
+    _safe_print(f"GET {search_url} → searching providers...")
+    r = client.get(search_url, headers=_bazarr_headers(access_token),
+                   timeout=3600.0)  # whisperai may transcribe synchronously (~30 min on a 57-min episode)
+    _safe_print(f"  status={r.status_code}")
     if r.status_code >= 400:
         _safe_print(_redact(r.text[:1000]))
-        sys.exit(f"Bazarr request failed (HTTP {r.status_code}).")
-    ctype = r.headers.get("content-type", "").lower()
-    if "json" not in ctype:
-        # A 200 with HTML almost always means the Authentik outpost served
-        # its landing/login page — the POST never reached Bazarr. Failing
-        # loudly is safer than pretending the search triggered.
-        _safe_print(
-            f"⚠ POST returned 200 but content-type={ctype!r} (not JSON). "
-            f"The request likely never reached Bazarr — set AUTHENTIK_COOKIE "
-            f"in .env.auth (full Cookie: header value from browser DevTools)."
+        sys.exit(f"Bazarr search failed (HTTP {r.status_code}).")
+    results = r.json().get("data", [])
+    _safe_print(f"  {len(results)} provider result(s):")
+    for entry in results:
+        _safe_print(f"    provider={entry.get('provider')!r:25s} "
+                    f"language={entry.get('language')!r:5s} "
+                    f"score={entry.get('score')}")
+
+    # Step 2: pick the result from the requested provider.
+    chosen = next(
+        (e for e in results if e.get("provider") == provider),
+        None,
+    )
+    if chosen is None:
+        sys.exit(
+            f"No '{provider}' result found among {len(results)} results. "
+            f"Providers returned: "
+            f"{sorted({e.get('provider') for e in results})}"
         )
-        _safe_print(_redact(r.text[:400]))
-        sys.exit(2)
+    subtitle_id = chosen.get("subtitle")
+    if not subtitle_id:
+        sys.exit(f"Chosen result missing 'subtitle' id: {chosen!r}")
+    _safe_print(f"  ✓ picked provider={provider!r} subtitle={subtitle_id!r}")
+
+    # Step 3: download. Bazarr requires all the boolean flags + provider
+    # + subtitle id. The whisperai provider then calls our whisper-gend
+    # ASR endpoint to actually transcribe.
+    dl_url = (f"{base}/api/providers/episodes"
+              f"?seriesid={series_id}&episodeid={episode_id}"
+              f"&hi=False&forced=False&original_format=False"
+              f"&provider={provider}&subtitle={subtitle_id}")
+    _safe_print(f"POST {dl_url} → downloading...")
+    r = client.post(dl_url, headers=_bazarr_headers(access_token),
+                    timeout=3600.0)
+    _safe_print(f"  status={r.status_code}")
+    if r.status_code >= 400:
+        _safe_print(_redact(r.text[:1000]))
+        sys.exit(f"Bazarr download failed (HTTP {r.status_code}).")
     _safe_print(_redact(r.text[:1000]))
 
 
@@ -396,7 +435,12 @@ def main() -> None:
             return
 
         if args.episode_id is not None:
-            trigger_search(client, access_token, args.episode_id)
+            if args.series_id is None:
+                sys.exit("--episode-id requires --series-id (Bazarr's search "
+                         "route is series-scoped).")
+            trigger_search(
+                client, access_token, args.series_id, args.episode_id,
+            )
             return
 
         if (args.series_id is not None
@@ -410,12 +454,12 @@ def main() -> None:
                 f"resolved series={args.series_id} "
                 f"S{args.season:02d}E{args.episode:02d} → episode id {ep_id}"
             )
-            trigger_search(client, access_token, ep_id)
+            trigger_search(client, access_token, args.series_id, ep_id)
             return
 
     sys.exit(
         "Need one of: --dry-run | --list-episodes --series-id N | "
-        "--episode-id N | --series-id N --season N --episode N"
+        "--series-id N --episode-id N | --series-id N --season N --episode N"
     )
 
 
