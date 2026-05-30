@@ -161,22 +161,28 @@ def _load_cached_cookie() -> str | None:
 
 
 def authenticate(client: httpx.Client, *, force_refresh: bool = False) -> str:
-    """Authentik OAuth 2.0 password grant. Client auth is in the request body
-    (per the Authentik client config). Returns the access token. Reuses a
-    cached token from ``.cache/bazarr_oauth_token.json`` if non-expired.
+    """Authentik OAuth 2.0 password grant. Returns the access token, or an
+    empty string when OAuth is disabled (no ``OAUTH_ACCESS_TOKEN_URL`` set in
+    ``.env.auth`` — typical for direct LAN access to Bazarr where there's no
+    reverse-proxy auth in the way).
 
-    The HTTP call goes through the supplied ``httpx.Client``, so any
-    ``Set-Cookie`` returned by the Authentik token endpoint (e.g. an
-    ``authentik_proxy_*`` session cookie with ``Domain=eben0.com``) gets
-    stored in the client's cookie jar and auto-forwarded to subsequent
-    Bazarr calls. That's the cheapest way to satisfy the outpost without
-    manually pasting a browser cookie.
+    When OAuth is configured, reuses a cached token from
+    ``.cache/bazarr_oauth_token.json`` if non-expired. The HTTP call goes
+    through the supplied ``httpx.Client`` so any ``Set-Cookie`` returned by
+    the token endpoint (e.g. an ``authentik_proxy_*`` session cookie) gets
+    stored in the client's cookie jar and persisted into the cache for
+    automatic forwarding on later runs.
     """
+    # Skip OAuth entirely when the token URL isn't configured. Useful for
+    # local/LAN setups where Bazarr is exposed directly (X-API-KEY only).
+    token_url = os.getenv("OAUTH_ACCESS_TOKEN_URL", "").strip()
+    if not token_url:
+        _safe_print("(OAuth disabled — OAUTH_ACCESS_TOKEN_URL not set)")
+        return ""
     if not force_refresh:
         cached = _load_cached_token()
         if cached:
             return cached
-    token_url = _env("OAUTH_ACCESS_TOKEN_URL")
     body = {
         "grant_type": _env("OAUTH_GRANT_TYPE"),
         "client_id": _env("OAUTH_CLIENT_ID"),
@@ -230,10 +236,13 @@ def _bazarr_headers(access_token: str) -> dict[str, str]:
     * ``X-API-KEY: <bazarr_api_key>`` — Bazarr's own API gate.
     """
     headers = {
-        "Authorization": f"Bearer {access_token}",
         "X-API-KEY": _env("BAZARR_API_KEY"),
         "Accept": "application/json",
     }
+    # Authentication for the reverse-proxy layer (skipped on direct LAN
+    # access where these headers are unnecessary).
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
     # Prefer the OAuth-captured cookies persisted alongside the token;
     # fall back to AUTHENTIK_COOKIE in .env.auth for outposts whose token
     # endpoint doesn't set cookies (the manual-paste path).
