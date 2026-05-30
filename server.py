@@ -16,7 +16,6 @@ import asyncio
 import logging
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -25,11 +24,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from core import backends, concurrency, cuda
+from core import audio, backends, concurrency, cuda
 cuda.bootstrap()
 
 import numpy as np
-import soundfile as sf
 from fastapi import FastAPI, File, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 
@@ -49,49 +47,6 @@ VERSION = "1.0.0"
 
 app = FastAPI(title="Gender-Aware Hebrew Subtitle Server", version=VERSION)
 
-
-# --------------------------------------------------------------------------- #
-# Audio helpers
-# --------------------------------------------------------------------------- #
-
-def encode_to_wav(src: Path, dst: Path) -> None:
-    """Re-encode any input to 16 kHz mono WAV via ffmpeg."""
-    proc = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(src), "-ar", "16000", "-ac", "1", str(dst)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
-    if proc.returncode != 0:
-        stderr_tail = (proc.stderr or b"").decode("utf-8", "replace").strip().splitlines()[-15:]
-        raise RuntimeError(
-            "ffmpeg failed (exit %d) encoding %s:\n%s"
-            % (proc.returncode, src.name, "\n".join(stderr_tail))
-        )
-
-
-def prepare_unencoded(src: Path, dst: Path, sr: int = 16000) -> None:
-    """Turn an ``encode=false`` upload into a 16 kHz mono WAV at ``dst``.
-
-    Per the whisper-asr-webservice contract that Bazarr follows, ``encode=false``
-    means the body is *headerless* raw 16-bit little-endian PCM (mono, 16 kHz) --
-    the reference server reads it straight as ``np.int16``. faster-whisper's
-    container decoder rejects that (AVERROR_INVALIDDATA), so we wrap it in a real
-    WAV here. A few clients instead send an actual container (WAV/FLAC); we detect
-    that by trying to open it first and only fall back to raw PCM if that fails.
-    """
-    try:
-        with sf.SoundFile(str(src)):
-            pass
-        shutil.copyfile(src, dst)  # real container; downstream handles sr/channels
-        return
-    except (RuntimeError, sf.LibsndfileError):
-        pass
-    pcm = np.frombuffer(src.read_bytes(), dtype="<i2").astype(np.float32) / 32768.0
-    sf.write(str(dst), pcm, sr, subtype="PCM_16")
-
-
-def _write_silent_wav(path: Path, seconds: float = 1.0, sr: int = 16000) -> None:
-    sf.write(str(path), np.zeros(int(seconds * sr), dtype=np.float32), sr)
 
 
 def _compute_side_file_path(
@@ -289,13 +244,6 @@ def _group_consecutive(items: list[tuple[Segment, str | None]]) -> list[tuple[st
     return groups
 
 
-def _load_wav_mono(audio_path: Path) -> tuple[np.ndarray, int]:
-    """Load a WAV as a mono float32 waveform + sample rate."""
-    data, sr = sf.read(str(audio_path), dtype="float32", always_2d=False)
-    if data.ndim > 1:
-        data = data.mean(axis=1)
-    return data, sr
-
 
 def _diarize_and_gender(audio: np.ndarray, sr: int, start: float, end: float):
     """Diarize one chunk's audio slice and detect per-speaker gender.
@@ -438,7 +386,7 @@ async def _run_gender_aware(
     Gender classification still runs on every call (it's cheap, and the
     classifier may have been flipped between passes).
     """
-    audio, sr = await concurrency.run_in_thread(_load_wav_mono, audio_path)
+    waveform, sr = await concurrency.run_in_thread(audio._load_wav_mono, audio_path)
     chunks = make_chunks(segments, settings.CHUNK_DURATION_SEC)
     annotations_used: list[Any] = []
     sem = asyncio.Semaphore(settings.TRANSLATE_CONCURRENCY)
@@ -463,8 +411,8 @@ async def _run_gender_aware(
                 # cheap (a numpy view, not a copy).
                 annotation = precomputed_annotations[idx]
                 i0 = max(0, int(chunk.start * sr))
-                i1 = min(len(audio), int(chunk.end * sr))
-                slice_ = audio[i0:i1]
+                i1 = min(len(waveform), int(chunk.end * sr))
+                slice_ = waveform[i0:i1]
                 genders = await concurrency.run_in_thread(
                     gender.detect_genders, slice_, sr, annotation,
                 )
@@ -475,7 +423,7 @@ async def _run_gender_aware(
                 )
             else:
                 annotation, genders = await concurrency.run_in_thread(
-                    _diarize_and_gender, audio, sr, chunk.start, chunk.end
+                    _diarize_and_gender, waveform, sr, chunk.start, chunk.end
                 )
                 log.info(
                     "chunk %d/%d diarize+gender done (%d speakers)",
@@ -761,7 +709,7 @@ async def warmup() -> None:
     )
     tmp = Path(tempfile.gettempdir()) / f"warmup_{uuid.uuid4().hex}.wav"
     try:
-        _write_silent_wav(tmp)
+        audio._write_silent_wav(tmp)
         await concurrency.run_in_thread(transcribe.warmup, tmp)
         if settings.is_gender_aware():
             try:
@@ -835,9 +783,9 @@ async def asr(
 
         audio_path = workdir / "audio.wav"
         if encode:
-            await concurrency.run_in_thread(encode_to_wav, raw_path, audio_path)
+            await concurrency.run_in_thread(audio.encode_to_wav, raw_path, audio_path)
         else:
-            await concurrency.run_in_thread(prepare_unencoded, raw_path, audio_path)
+            await concurrency.run_in_thread(audio.prepare_unencoded, raw_path, audio_path)
 
         alt_target = None  # initialized for the post-semaphore block
 

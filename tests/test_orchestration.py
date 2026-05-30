@@ -22,7 +22,7 @@ def _install_fakes(monkeypatch, segments, gender_aware):
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
 
     monkeypatch.setattr(server.transcribe, "transcribe", lambda path, language="en": list(segments))
-    monkeypatch.setattr(server, "_load_wav_mono", lambda path: (np.zeros(16000 * 12, dtype=np.float32), 16000))
+    monkeypatch.setattr(server.audio, "_load_wav_mono",lambda path: (np.zeros(16000 * 12, dtype=np.float32), 16000))
     def fake_diarize(waveform, sr):
         ann = Annotation()
         ann[PSegment(0.0, 6.0)] = "SPEAKER_00"
@@ -56,7 +56,7 @@ async def test_plain_translate_no_diarization(monkeypatch, two_chunk_segments):
     _install_fakes(monkeypatch, two_chunk_segments, gender_aware=False)
     # If diarization were called in the plain path this would raise.
     monkeypatch.setattr(server.diarize, "diarize_waveform", lambda *a: (_ for _ in ()).throw(AssertionError("diarize called in plain path")))
-    monkeypatch.setattr(server, "_load_wav_mono", lambda *a: (_ for _ in ()).throw(AssertionError("_load_wav_mono called in plain path")))
+    monkeypatch.setattr(server.audio, "_load_wav_mono",lambda *a: (_ for _ in ()).throw(AssertionError("_load_wav_mono called in plain path")))
     source, target = await server.run_pipeline_async(server.Path("ignored.wav"), "en")
     assert [s.text for s in source] == ["hello", "world"]
     assert [s.text for s in target] == ["hello|None", "world|None"]
@@ -81,7 +81,7 @@ async def test_chunk_local_offset_maps_speakers(monkeypatch, two_chunk_segments)
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 5)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
     monkeypatch.setattr(server.transcribe, "transcribe", lambda path, language="en": list(two_chunk_segments))
-    monkeypatch.setattr(server, "_load_wav_mono", lambda path: (np.zeros(16000 * 12, dtype=np.float32), 16000))
+    monkeypatch.setattr(server.audio, "_load_wav_mono",lambda path: (np.zeros(16000 * 12, dtype=np.float32), 16000))
 
     def fake_diarize(waveform, sr):
         ann = Annotation()
@@ -116,7 +116,7 @@ async def test_addressee_rotates_within_chunk(monkeypatch):
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 30)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
     monkeypatch.setattr(server.transcribe, "transcribe", lambda path, language="en": list(segs))
-    monkeypatch.setattr(server, "_load_wav_mono", lambda path: (np.zeros(16000 * 5, dtype=np.float32), 16000))
+    monkeypatch.setattr(server.audio, "_load_wav_mono",lambda path: (np.zeros(16000 * 5, dtype=np.float32), 16000))
 
     # Slice-local annotation: speakers cover [0,1), [1,2), [2,3) within the chunk.
     ann = Annotation()
@@ -163,7 +163,7 @@ async def test_addressee_carries_across_chunks(monkeypatch):
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 5)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
     monkeypatch.setattr(server.transcribe, "transcribe", lambda path, language="en": list(segs))
-    monkeypatch.setattr(server, "_load_wav_mono", lambda path: (np.zeros(16000 * 12, dtype=np.float32), 16000))
+    monkeypatch.setattr(server.audio, "_load_wav_mono",lambda path: (np.zeros(16000 * 12, dtype=np.float32), 16000))
     def fake_diarize(waveform, sr):
         ann = Annotation()
         ann[PSegment(0.0, 6.0)] = "S"
@@ -207,7 +207,7 @@ async def test_addressee_does_not_carry_across_chunks(monkeypatch):
     monkeypatch.setattr(server.settings, "ADDRESSEE_GENDER_HINT_ENABLED", True)
     monkeypatch.setattr(server.transcribe, "transcribe",
                         lambda path, language="en": list(segs))
-    monkeypatch.setattr(server, "_load_wav_mono",
+    monkeypatch.setattr(server.audio, "_load_wav_mono",
                         lambda path: (np.zeros(16000 * 12, dtype=np.float32), 16000))
 
     def fake_diarize(waveform, sr):
@@ -257,7 +257,7 @@ async def test_addressee_hint_disabled_by_flag(monkeypatch):
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
     monkeypatch.setattr(server.settings, "ADDRESSEE_GENDER_HINT_ENABLED", False)
     monkeypatch.setattr(server.transcribe, "transcribe", lambda path, language="en": list(segs))
-    monkeypatch.setattr(server, "_load_wav_mono", lambda path: (np.zeros(16000 * 5, dtype=np.float32), 16000))
+    monkeypatch.setattr(server.audio, "_load_wav_mono",lambda path: (np.zeros(16000 * 5, dtype=np.float32), 16000))
 
     ann = Annotation()
     ann[PSegment(0.0, 1.0)] = "S_M1"
@@ -292,7 +292,7 @@ async def test_source_language_from_request_reaches_translator(monkeypatch):
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 30)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
     monkeypatch.setattr(server.transcribe, "transcribe", lambda path, language="en": list(segs))
-    monkeypatch.setattr(server, "_load_wav_mono", lambda path: (np.zeros(16000 * 2, dtype=np.float32), 16000))
+    monkeypatch.setattr(server.audio, "_load_wav_mono",lambda path: (np.zeros(16000 * 2, dtype=np.float32), 16000))
 
     ann = Annotation()
     ann[PSegment(0.0, 1.0)] = "S"
@@ -327,7 +327,7 @@ async def test_pipeline_preserves_source_alongside_translation(monkeypatch):
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 30)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
     monkeypatch.setattr(server.transcribe, "transcribe", lambda path, language="en": list(segs))
-    monkeypatch.setattr(server, "_load_wav_mono", lambda path: (np.zeros(16000 * 3, dtype=np.float32), 16000))
+    monkeypatch.setattr(server.audio, "_load_wav_mono",lambda path: (np.zeros(16000 * 3, dtype=np.float32), 16000))
 
     ann = Annotation()
     ann[PSegment(0.0, 1.0)] = "S"
@@ -378,8 +378,8 @@ def test_asr_response_is_source_side_file_is_target(monkeypatch):
     monkeypatch.setattr(server, "run_pipeline_async", fake_pipeline)
 
     # Stub the audio prep so the upload doesn't hit ffmpeg.
-    monkeypatch.setattr(server, "encode_to_wav", lambda src, dst: None)
-    monkeypatch.setattr(server, "prepare_unencoded", lambda src, dst: None)
+    monkeypatch.setattr(server.audio, "encode_to_wav", lambda src, dst: None)
+    monkeypatch.setattr(server.audio, "prepare_unencoded", lambda src, dst: None)
 
     captured: dict[str, object] = {}
     def fake_save(body, summary, video_file_url):
@@ -433,7 +433,7 @@ async def test_orchestrator_logs_segment_counts(monkeypatch, caplog):
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 1)
     monkeypatch.setattr(server.transcribe, "transcribe",
                         lambda path, language="en": list(segs))
-    monkeypatch.setattr(server, "_load_wav_mono",
+    monkeypatch.setattr(server.audio, "_load_wav_mono",
                         lambda path: (np.zeros(16000 * 4, dtype=np.float32), 16000))
 
     ann = Annotation()
@@ -483,7 +483,7 @@ async def test_orchestrator_logs_error_on_segment_count_mismatch(monkeypatch, ca
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 1)
     monkeypatch.setattr(server.transcribe, "transcribe",
                         lambda path, language="en": list(segs))
-    monkeypatch.setattr(server, "_load_wav_mono",
+    monkeypatch.setattr(server.audio, "_load_wav_mono",
                         lambda path: (np.zeros(16000 * 4, dtype=np.float32), 16000))
 
     ann = Annotation()
@@ -534,8 +534,8 @@ def test_asr_skips_side_file_when_target_is_none(monkeypatch):
         # capture is irrelevant; just match the signature.
         return source_segs, None
     monkeypatch.setattr(server, "run_pipeline_async", fake_pipeline)
-    monkeypatch.setattr(server, "encode_to_wav", lambda src, dst: None)
-    monkeypatch.setattr(server, "prepare_unencoded", lambda src, dst: None)
+    monkeypatch.setattr(server.audio, "encode_to_wav", lambda src, dst: None)
+    monkeypatch.setattr(server.audio, "prepare_unencoded", lambda src, dst: None)
 
     save_called = {"hit": False}
     def fake_save(body, summary, video_file_url):
@@ -579,7 +579,7 @@ async def test_translate_context_window_is_passed_to_each_batch(monkeypatch):
     monkeypatch.setattr(server.settings, "TRANSLATE_CONTEXT_LINES", 2)
     monkeypatch.setattr(server.transcribe, "transcribe",
                         lambda path, language="en": list(segs))
-    monkeypatch.setattr(server, "_load_wav_mono",
+    monkeypatch.setattr(server.audio, "_load_wav_mono",
                         lambda path: (np.zeros(16000 * 6, dtype=np.float32), 16000))
 
     # Force 5 separate groups (one per segment) by having each segment
@@ -632,7 +632,7 @@ async def test_translate_context_disabled_when_setting_zero(monkeypatch):
     monkeypatch.setattr(server.settings, "TRANSLATE_CONTEXT_LINES", 0)
     monkeypatch.setattr(server.transcribe, "transcribe",
                         lambda path, language="en": list(segs))
-    monkeypatch.setattr(server, "_load_wav_mono",
+    monkeypatch.setattr(server.audio, "_load_wav_mono",
                         lambda path: (np.zeros(16000 * 3, dtype=np.float32), 16000))
 
     ann = Annotation()
@@ -723,8 +723,8 @@ def test_asr_emits_alt_classifier_srt_when_ab_output_enabled(monkeypatch):
         return source_segs, alt_target
     monkeypatch.setattr(server, "run_pipeline_alt_classifier", fake_alt)
 
-    monkeypatch.setattr(server, "encode_to_wav", lambda src, dst: None)
-    monkeypatch.setattr(server, "prepare_unencoded", lambda src, dst: None)
+    monkeypatch.setattr(server.audio, "encode_to_wav", lambda src, dst: None)
+    monkeypatch.setattr(server.audio, "prepare_unencoded", lambda src, dst: None)
 
     saved: list[tuple[str, str]] = []  # (suffix, body)
     def fake_save(body, summary, video_file_url, suffix=None):
