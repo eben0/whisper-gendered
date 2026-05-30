@@ -93,10 +93,9 @@ from pipeline.format import render
 from pipeline.lang import language_name, target_script_ratio
 from pipeline.transcribe import Segment
 
-logging.basicConfig(
-    level=logging.DEBUG if settings.DEBUG else logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+from core.logging_config import configure as _configure_logging
+
+_configure_logging()
 log = logging.getLogger("server")
 
 VERSION = "1.0.0"
