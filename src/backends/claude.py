@@ -57,50 +57,6 @@ to later lines — but for addressee inference the trade-off pays off.
 """
 
 
-def _system_prompt(
-    target_language: str,
-    gender: str | None,
-    addressee_gender: str | None = None,
-    source_language: str = "English",
-) -> str:
-    """Assemble the system prompt from templates in ``prompt/translate/``.
-
-    Language-specific sections are only included when relevant:
-    - transliteration guidance is skipped for Latin-script targets
-      (French, Spanish, German, etc.) where proper nouns stay as-is.
-    - Hebrew-specific preposition guidance is only included when the
-      target is Hebrew.
-    """
-    from pipeline.lang import uses_non_latin_script
-    parts: list[str] = [
-        prompt.load("translate/base",
-                    source_language=source_language, target_language=target_language),
-    ]
-    if uses_non_latin_script(target_language):
-        parts.append(prompt.load("translate/style_transliteration",
-                                 target_language=target_language))
-    parts.append(prompt.load("translate/style_slang",
-                             source_language=source_language,
-                             target_language=target_language))
-    parts.append(prompt.load("translate/style_prepositions",
-                             source_language=source_language,
-                             target_language=target_language))
-    if target_language == "Hebrew":
-        parts.append(prompt.load("translate/style_prepositions_hebrew"))
-    parts.append(prompt.load("translate/style_length"))
-    if gender is not None:
-        parts.append(prompt.load("translate/gender_speaker", gender=gender))
-        parts.append(prompt.load("translate/gender_you_form",
-                                 source_language=source_language,
-                                 target_language=target_language))
-        if addressee_gender is not None:
-            parts.append(prompt.load("translate/gender_addressee",
-                                     addressee_gender=addressee_gender))
-        parts.append(prompt.load("translate/gender_number"))
-    parts.append(prompt.load("translate/scene_context",
-                             target_language=target_language))
-    parts.append(prompt.load("translate/output_format"))
-    return " ".join(parts)
 
 
 def _build_user_message(
@@ -168,34 +124,6 @@ def _chunks(texts: list[str]) -> list[list[str]]:
     return batches
 
 
-def _system_blocks(
-    target_language: str,
-    gender: str | None,
-    addressee_gender: str | None,
-    source_language: str,
-) -> list[dict]:
-    """Wrap the system prompt as a single cacheable content block.
-
-    Setting ``cache_control`` on the system block opts this request into
-    Anthropic prompt caching: subsequent calls within the cache TTL that
-    share the same system prompt skip re-encoding it on the input side
-    (~90% input-token discount on the cached portion). All batches inside
-    one ``/asr`` request use the same system prompt — same target language,
-    same speaker gender, same addressee gender — so the first batch primes
-    the cache and the rest hit it.
-
-    Caveat: caching requires the cached prefix to exceed a model-specific
-    minimum (currently 1024 tokens for Sonnet). Our gender-aware Hebrew
-    system prompt is ~550 tokens, so the API may silently fall back to
-    non-cached behaviour today. Leaving ``cache_control`` in place is
-    forward-compatible: if/when prompts grow past the threshold or
-    Anthropic lowers it, caching kicks in automatically.
-    """
-    return [{
-        "type": "text",
-        "text": _system_prompt(target_language, gender, addressee_gender, source_language),
-        "cache_control": {"type": "ephemeral"},
-    }]
 
 
 def _log_usage(response, batch_size: int) -> None:
@@ -228,7 +156,83 @@ class ClaudeBackend(TranslationBackend):
 
     def __init__(self, settings: "Settings") -> None:
         self._settings = settings
+        self._target_language = settings.TARGET_LANGUAGE
         self._client = None
+
+    def _system_prompt(
+        self,
+        gender: str | None,
+        addressee_gender: str | None = None,
+        source_language: str = "English",
+    ) -> str:
+        """Assemble the system prompt from templates in ``prompt/translate/``.
+
+        Language-specific sections are only included when relevant:
+        - transliteration guidance is skipped for Latin-script targets
+          (French, Spanish, German, etc.) where proper nouns stay as-is.
+        - Hebrew-specific preposition guidance is only included when the
+          target is Hebrew.
+        """
+        from pipeline.lang import uses_non_latin_script
+        target_language = self._target_language
+        parts: list[str] = [
+            prompt.load("translate/base",
+                        source_language=source_language, target_language=target_language),
+        ]
+        if uses_non_latin_script(target_language):
+            parts.append(prompt.load("translate/style_transliteration",
+                                     target_language=target_language))
+        parts.append(prompt.load("translate/style_slang",
+                                 source_language=source_language,
+                                 target_language=target_language))
+        parts.append(prompt.load("translate/style_prepositions",
+                                 source_language=source_language,
+                                 target_language=target_language))
+        if target_language == "Hebrew":
+            parts.append(prompt.load("translate/style_prepositions_hebrew"))
+        parts.append(prompt.load("translate/style_length"))
+        if gender is not None:
+            parts.append(prompt.load("translate/gender_speaker", gender=gender))
+            parts.append(prompt.load("translate/gender_you_form",
+                                     source_language=source_language,
+                                     target_language=target_language))
+            if addressee_gender is not None:
+                parts.append(prompt.load("translate/gender_addressee",
+                                         addressee_gender=addressee_gender))
+            parts.append(prompt.load("translate/gender_number"))
+        parts.append(prompt.load("translate/scene_context",
+                                 target_language=target_language))
+        parts.append(prompt.load("translate/output_format"))
+        return " ".join(parts)
+
+    def _system_blocks(
+        self,
+        gender: str | None,
+        addressee_gender: str | None,
+        source_language: str,
+    ) -> list[dict]:
+        """Wrap the system prompt as a single cacheable content block.
+
+        Setting ``cache_control`` on the system block opts this request into
+        Anthropic prompt caching: subsequent calls within the cache TTL that
+        share the same system prompt skip re-encoding it on the input side
+        (~90% input-token discount on the cached portion). All batches inside
+        one ``/asr`` request use the same system prompt — same target language,
+        same speaker gender, same addressee gender — so the first batch primes
+        the cache and the rest hit it.
+
+        Caveat: caching requires the cached prefix to exceed a model-specific
+        minimum (currently 1024 tokens for Sonnet). Our gender-aware Hebrew
+        system prompt is ~550 tokens, so the API may silently fall back to
+        non-cached behaviour today. Leaving ``cache_control`` in place is
+        forward-compatible: if/when prompts grow past the threshold or
+        Anthropic lowers it, caching kicks in automatically.
+        """
+        return [{
+            "type": "text",
+            "text": self._system_prompt(gender, addressee_gender, source_language),
+            "cache_control": {"type": "ephemeral"},
+        }]
 
     def _get_client(self):
         """Lazy Anthropic client with double-checked locking (thread-safe)."""
@@ -259,7 +263,7 @@ class ClaudeBackend(TranslationBackend):
         response = client.messages.create(
             model=self._settings.CLAUDE_MODEL,
             max_tokens=MAX_TOKENS,
-            system=_system_blocks(target_language, gender, addressee_gender, source_language),
+            system=self._system_blocks(gender, addressee_gender, source_language),
             output_config={"format": _OUTPUT_FORMAT},
             messages=[{"role": "user", "content": numbered}],
         )
@@ -331,7 +335,7 @@ class ClaudeBackend(TranslationBackend):
         response = await client.messages.create(
             model=self._settings.CLAUDE_MODEL,
             max_tokens=MAX_TOKENS,
-            system=_system_blocks(target_language, gender, addressee_gender, source_language),
+            system=self._system_blocks(gender, addressee_gender, source_language),
             output_config={"format": _OUTPUT_FORMAT},
             messages=[{"role": "user", "content": numbered}],
         )

@@ -27,7 +27,8 @@ from pipeline.gender.pitch import (
 # Import-time snapshot of threshold (matches old module behavior).
 GENDER_THRESHOLD_HZ = config.settings.GENDER_THRESHOLD_HZ
 
-_default_detector = GenderDetector(config.settings)
+_default_ml = GenderMLClassifier(config.settings)
+_default_detector = GenderDetector(config.settings, gender_ml=_default_ml)
 
 
 def _classify_f0(f0) -> str:

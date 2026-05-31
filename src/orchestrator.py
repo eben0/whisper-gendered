@@ -14,7 +14,7 @@ from typing import Any, TYPE_CHECKING
 
 from src.artifacts import PipelineArtifacts
 from src.config import settings
-from pipeline import diarize, gender, transcribe
+from pipeline import diarize, gender
 from pipeline.chunk import make_chunks
 from pipeline.lang import language_name
 from pipeline.segment import Segment
@@ -85,11 +85,13 @@ class Orchestrator:
         leave the parameter at its default and observe no behavior change.
         """
         t0 = time.monotonic()
-        _transcribe_fn = (
-            self._transcriber.transcribe if self._transcriber is not None
-            else transcribe.transcribe
+        if self._transcriber is None:
+            raise RuntimeError(
+                "Orchestrator requires a Transcriber instance; got None."
+            )
+        segments = await self._concurrency.run_in_thread(
+            self._transcriber.transcribe, audio_path, language
         )
-        segments = await self._concurrency.run_in_thread(_transcribe_fn, audio_path, language)
         transcribe_elapsed = time.monotonic() - t0
         # Two log lines: the historical timing line, then an explicit-count
         # line worded for grep ("transcribed N segments"). The count line

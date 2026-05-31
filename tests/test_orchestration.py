@@ -15,6 +15,19 @@ from pipeline.transcribe import Segment
 # Helpers — lightweight stubs for injected dependencies
 # ---------------------------------------------------------------------------
 
+class _FakeTranscriber:
+    """Transcriber stub: returns a fixed list of segments."""
+
+    def __init__(self, segments):
+        self._segments = segments
+
+    def transcribe(self, path, language="en"):
+        return list(self._segments)
+
+    def model_loaded(self):
+        return True
+
+
 class _FakeConcurrencyMgr:
     """Runs functions inline (same event loop, same thread) instead of a pool.
 
@@ -75,8 +88,6 @@ def _install_fakes(monkeypatch, segments, gender_aware):
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 5)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
 
-    monkeypatch.setattr(orchestrator.transcribe, "transcribe", lambda path, language="en": list(segments))
-
     def fake_diarize(waveform, sr):
         ann = Annotation()
         ann[PSegment(0.0, 6.0)] = "SPEAKER_00"
@@ -99,7 +110,8 @@ async def test_gender_aware_preserves_order_and_applies_gender(monkeypatch, two_
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend)
+    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
+                       transcriber=_FakeTranscriber(two_chunk_segments))
     source, target = await orc.run_pipeline(Path("ignored.wav"), "en")
     # Source list keeps the raw transcript text.
     assert [s.text for s in source] == ["hello", "world"]
@@ -125,7 +137,8 @@ async def test_plain_translate_no_diarization(monkeypatch, two_chunk_segments):
         raise AssertionError("_load_wav_mono called in plain path")
     fake_audio = _FakeAudio(raise_on_load)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend)
+    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
+                       transcriber=_FakeTranscriber(two_chunk_segments))
     source, target = await orc.run_pipeline(Path("ignored.wav"), "en")
     assert [s.text for s in source] == ["hello", "world"]
     assert [s.text for s in target] == ["hello|None", "world|None"]
@@ -134,8 +147,8 @@ async def test_plain_translate_no_diarization(monkeypatch, two_chunk_segments):
 @pytest.mark.asyncio
 async def test_transcription_only_when_target_none(monkeypatch, two_chunk_segments):
     monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "none")
-    monkeypatch.setattr(orchestrator.transcribe, "transcribe", lambda path, language="en": list(two_chunk_segments))
-    orc = Orchestrator(_FakeConcurrencyMgr(), _FakeAudio(), _FakeBackend())
+    orc = Orchestrator(_FakeConcurrencyMgr(), _FakeAudio(), _FakeBackend(),
+                       transcriber=_FakeTranscriber(two_chunk_segments))
     source, target = await orc.run_pipeline(Path("ignored.wav"), "en")
     # Translation disabled -> target is None, source is the raw transcript.
     assert target is None
@@ -150,7 +163,6 @@ async def test_chunk_local_offset_maps_speakers(monkeypatch, two_chunk_segments)
     monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Hebrew")
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 5)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
-    monkeypatch.setattr(orchestrator.transcribe, "transcribe", lambda path, language="en": list(two_chunk_segments))
 
     def fake_diarize(waveform, sr):
         ann = Annotation()
@@ -168,7 +180,8 @@ async def test_chunk_local_offset_maps_speakers(monkeypatch, two_chunk_segments)
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend)
+    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
+                       transcriber=_FakeTranscriber(two_chunk_segments))
     _, target = await orc.run_pipeline(Path("ignored.wav"), "en")
     # Chunk 2's segment is absolute 6-12. Only if chunk_start (6.0) is subtracted
     # does its local midpoint (3.0) fall inside the [0,6) turn -> speaker "S" ->
@@ -188,7 +201,6 @@ async def test_addressee_rotates_within_chunk(monkeypatch):
     monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Hebrew")
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 30)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
-    monkeypatch.setattr(orchestrator.transcribe, "transcribe", lambda path, language="en": list(segs))
 
     # Slice-local annotation: speakers cover [0,1), [1,2), [2,3) within the chunk.
     ann = Annotation()
@@ -212,7 +224,8 @@ async def test_addressee_rotates_within_chunk(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend)
+    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
+                       transcriber=_FakeTranscriber(segs))
     _, target = await orc.run_pipeline(Path("ignored.wav"), "en")
     # Three groups -> three translate calls, addressee = previous group's speaker gender.
     # First group: no prior speaker at all -> None. Then "male", then "female".
@@ -238,7 +251,6 @@ async def test_addressee_carries_across_chunks(monkeypatch):
     monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Hebrew")
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 5)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
-    monkeypatch.setattr(orchestrator.transcribe, "transcribe", lambda path, language="en": list(segs))
 
     def fake_diarize(waveform, sr):
         ann = Annotation()
@@ -261,7 +273,8 @@ async def test_addressee_carries_across_chunks(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend)
+    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
+                       transcriber=_FakeTranscriber(segs))
     _, target = await orc.run_pipeline(Path("ignored.wav"), "en")
     # Output order is preserved by the orchestrator's final list comprehension.
     # Chunk 1's segment "a": speaker female, addressee None (first chunk's first group).
@@ -286,8 +299,6 @@ async def test_addressee_does_not_carry_across_chunks(monkeypatch):
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 5)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
     monkeypatch.setattr(server.settings, "ADDRESSEE_GENDER_HINT_ENABLED", True)
-    monkeypatch.setattr(orchestrator.transcribe, "transcribe",
-                        lambda path, language="en": list(segs))
 
     def fake_diarize(waveform, sr):
         ann = Annotation()
@@ -316,7 +327,8 @@ async def test_addressee_does_not_carry_across_chunks(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend)
+    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
+                       transcriber=_FakeTranscriber(segs))
     await orc.run_pipeline(Path("ignored.wav"), "en")
 
     # Two chunks, one group each — both first-of-chunk, so addressee None.
@@ -339,7 +351,6 @@ async def test_addressee_hint_disabled_by_flag(monkeypatch):
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 30)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
     monkeypatch.setattr(server.settings, "ADDRESSEE_GENDER_HINT_ENABLED", False)
-    monkeypatch.setattr(orchestrator.transcribe, "transcribe", lambda path, language="en": list(segs))
 
     ann = Annotation()
     ann[PSegment(0.0, 1.0)] = "S_M1"
@@ -362,7 +373,8 @@ async def test_addressee_hint_disabled_by_flag(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend)
+    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
+                       transcriber=_FakeTranscriber(segs))
     _, target = await orc.run_pipeline(Path("ignored.wav"), "en")
     # Flag off -> every call sees addressee_gender=None regardless of rotation.
     assert addressees == [None, None, None]
@@ -377,7 +389,6 @@ async def test_source_language_from_request_reaches_translator(monkeypatch):
     monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Hebrew")
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 30)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
-    monkeypatch.setattr(orchestrator.transcribe, "transcribe", lambda path, language="en": list(segs))
 
     ann = Annotation()
     ann[PSegment(0.0, 1.0)] = "S"
@@ -395,7 +406,8 @@ async def test_source_language_from_request_reaches_translator(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend)
+    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
+                       transcriber=_FakeTranscriber(segs))
     _, target = await orc.run_pipeline(Path("ignored.wav"), "fr")
     assert received == ["French"]
     assert [s.text for s in target] == ["x|French"]
@@ -415,7 +427,6 @@ async def test_pipeline_preserves_source_alongside_translation(monkeypatch):
     monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Hebrew")
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 30)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
-    monkeypatch.setattr(orchestrator.transcribe, "transcribe", lambda path, language="en": list(segs))
 
     ann = Annotation()
     ann[PSegment(0.0, 1.0)] = "S"
@@ -431,7 +442,8 @@ async def test_pipeline_preserves_source_alongside_translation(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend)
+    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
+                       transcriber=_FakeTranscriber(segs))
     source, target = await orc.run_pipeline(Path("ignored.wav"), "en")
 
     # English transcript preserved verbatim.
@@ -524,8 +536,6 @@ async def test_orchestrator_logs_segment_counts(monkeypatch, caplog):
     monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Hebrew")
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 30)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 1)
-    monkeypatch.setattr(orchestrator.transcribe, "transcribe",
-                        lambda path, language="en": list(segs))
 
     ann = Annotation()
     ann[PSegment(0.0, 3.0)] = "S"
@@ -544,7 +554,8 @@ async def test_orchestrator_logs_segment_counts(monkeypatch, caplog):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend)
+    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
+                       transcriber=_FakeTranscriber(segs))
     await orc.run_pipeline(Path("ignored.wav"), "en")
 
     msgs = [r.getMessage() for r in caplog.records]
@@ -576,8 +587,6 @@ async def test_orchestrator_logs_error_on_segment_count_mismatch(monkeypatch, ca
     monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Hebrew")
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 30)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 1)
-    monkeypatch.setattr(orchestrator.transcribe, "transcribe",
-                        lambda path, language="en": list(segs))
 
     ann = Annotation()
     ann[PSegment(0.0, 3.0)] = "S"
@@ -607,7 +616,8 @@ async def test_orchestrator_logs_error_on_segment_count_mismatch(monkeypatch, ca
         load_fn=lambda path: (np.zeros(16000 * 4, dtype=np.float32), 16000)
     )
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, _FakeBackend())
+    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, _FakeBackend(),
+                       transcriber=_FakeTranscriber(segs))
     await orc.run_pipeline(Path("ignored.wav"), "en")
 
     err_msgs = [r.getMessage() for r in caplog.records
@@ -674,8 +684,6 @@ async def test_translate_context_window_is_passed_to_each_batch(monkeypatch):
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 30)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 1)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONTEXT_LINES", 2)
-    monkeypatch.setattr(orchestrator.transcribe, "transcribe",
-                        lambda path, language="en": list(segs))
 
     # Force 5 separate groups (one per segment) by having each segment
     # belong to a different "speaker".
@@ -699,7 +707,8 @@ async def test_translate_context_window_is_passed_to_each_batch(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend)
+    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
+                       transcriber=_FakeTranscriber(segs))
     await orc.run_pipeline(Path("ignored.wav"), "en")
 
     # Context window now carries (speaker_gender, target_text) tuples.
@@ -729,8 +738,6 @@ async def test_translate_context_disabled_when_setting_zero(monkeypatch):
     monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Hebrew")
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 30)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONTEXT_LINES", 0)
-    monkeypatch.setattr(orchestrator.transcribe, "transcribe",
-                        lambda path, language="en": list(segs))
 
     ann = Annotation()
     ann[PSegment(0.0, 1.0)] = "S0"
@@ -752,7 +759,8 @@ async def test_translate_context_disabled_when_setting_zero(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend)
+    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
+                       transcriber=_FakeTranscriber(segs))
     await orc.run_pipeline(Path("ignored.wav"), "en")
     # Every call must see empty context.
     assert all(c == [] for c in received), received
@@ -773,8 +781,6 @@ async def test_translate_context_window_threads_through_plain_translate(monkeypa
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 1)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 1)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONTEXT_LINES", 4)
-    monkeypatch.setattr(orchestrator.transcribe, "transcribe",
-                        lambda path, language="en": list(segs))
 
     received: list[list[str]] = []
     async def fake_translate(texts, gender, target,
@@ -785,7 +791,8 @@ async def test_translate_context_window_threads_through_plain_translate(monkeypa
 
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), _FakeAudio(), fake_backend)
+    orc = Orchestrator(_FakeConcurrencyMgr(), _FakeAudio(), fake_backend,
+                       transcriber=_FakeTranscriber(segs))
     await orc.run_pipeline(Path("ignored.wav"), "en")
 
     # Chunk 1 (A): empty context.
@@ -873,8 +880,15 @@ async def test_alt_classifier_reuses_artifacts_without_retranscribe(monkeypatch)
     # Counters: if these go above 0 the regression is back.
     transcribe_calls = []
     diarize_calls = []
-    monkeypatch.setattr(orchestrator.transcribe, "transcribe",
-                        lambda *a, **k: transcribe_calls.append(a) or [])
+
+    class _CountingTranscriber:
+        def transcribe(self, *a, **k):
+            transcribe_calls.append(a)
+            return []
+
+        def model_loaded(self):
+            return True
+
     monkeypatch.setattr(orchestrator.diarize, "diarize_waveform",
                         lambda *a, **k: diarize_calls.append(a) or None)
 
@@ -902,7 +916,8 @@ async def test_alt_classifier_reuses_artifacts_without_retranscribe(monkeypatch)
         annotations=[sentinel_ann_chunk0],
     )
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), _FakeAudio(), _FakeBackend())
+    orc = Orchestrator(_FakeConcurrencyMgr(), _FakeAudio(), _FakeBackend(),
+                       transcriber=_CountingTranscriber())
     source, target = await orc.run_pipeline_alt_classifier(
         Path("ignored.wav"), "en", artifacts,
     )

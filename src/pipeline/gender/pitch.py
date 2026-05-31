@@ -144,12 +144,12 @@ class GenderDetector:
 
         if mode == "ml":
             # Use the injected ML classifier when available; fall back to
-            # the module-level import for backward compat.
+            # a lazily-imported singleton for backward compat.
             if self._gender_ml is not None:
                 ml_classify = self._gender_ml.classify_audio
             else:
-                from pipeline import gender_ml as _gender_ml_mod
-                ml_classify = _gender_ml_mod.classify_audio
+                from pipeline.gender.ml import GenderMLClassifier as _GenderMLCls
+                ml_classify = _GenderMLCls(self._settings).classify_audio
             try:
                 label, conf = ml_classify(signal, sr)
                 log.info(
@@ -175,8 +175,8 @@ class GenderDetector:
             if self._gender_ml is not None:
                 ml_classify = self._gender_ml.classify_audio
             else:
-                from pipeline import gender_ml as _gender_ml_mod
-                ml_classify = _gender_ml_mod.classify_audio
+                from pipeline.gender.ml import GenderMLClassifier as _GenderMLCls
+                ml_classify = _GenderMLCls(self._settings).classify_audio
 
             t0 = time.perf_counter()
             try:

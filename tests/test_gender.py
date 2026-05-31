@@ -100,11 +100,13 @@ def test_detect_genders_uses_pitch_by_default(monkeypatch):
     """Default classifier is 'pitch'; the ML path must not be touched."""
     monkeypatch.setattr("config.settings.GENDER_CLASSIFIER", "pitch")
     from pipeline import gender as g
+    from pipeline.gender.ml import GenderMLClassifier
 
     # If gender_ml is touched in pitch mode, this raises.
     monkeypatch.setattr(
-        "pipeline.gender_ml.classify_audio",
-        lambda *a, **kw: (_ for _ in ()).throw(
+        GenderMLClassifier,
+        "classify_audio",
+        lambda self, *a, **kw: (_ for _ in ()).throw(
             AssertionError("ML classifier called in pitch mode")
         ),
     )
@@ -116,15 +118,16 @@ def test_detect_genders_uses_pitch_by_default(monkeypatch):
 
 
 def test_detect_genders_uses_ml_when_configured(monkeypatch):
-    """GENDER_CLASSIFIER=ml routes through gender_ml.classify_audio."""
+    """GENDER_CLASSIFIER=ml routes through GenderMLClassifier.classify_audio."""
     monkeypatch.setattr("config.settings.GENDER_CLASSIFIER", "ml")
     from pipeline import gender as g
+    from pipeline.gender.ml import GenderMLClassifier
 
     called = {"n": 0}
-    def fake_ml(audio, sr):
+    def fake_ml(self, audio, sr):
         called["n"] += 1
         return ("female", 0.91)
-    monkeypatch.setattr("pipeline.gender_ml.classify_audio", fake_ml)
+    monkeypatch.setattr(GenderMLClassifier, "classify_audio", fake_ml)
 
     audio = np.zeros(int(0.5 * SR), dtype=np.float32)
     ann = Annotation()
@@ -142,12 +145,14 @@ def test_detect_genders_ensemble_logs_disagreement(monkeypatch, caplog):
     caplog.set_level(logging.INFO, logger="pipeline.gender")
     monkeypatch.setattr("config.settings.GENDER_CLASSIFIER", "ensemble")
     from pipeline import gender as g
+    from pipeline.gender.ml import GenderMLClassifier
 
     # Pitch says male (120 Hz tone < 165 Hz threshold).
     # ML says female. Ensemble must pick ML's answer and log disagreement.
     monkeypatch.setattr(
-        "pipeline.gender_ml.classify_audio",
-        lambda audio, sr: ("female", 0.85),
+        GenderMLClassifier,
+        "classify_audio",
+        lambda self, audio, sr: ("female", 0.85),
     )
     low = _tone(120.0)
     ann = Annotation()
@@ -186,10 +191,12 @@ def test_ensemble_warns_when_ml_too_slow(monkeypatch, caplog):
         return f0, voiced_flag, voiced_prob
     monkeypatch.setattr("pipeline.gender.librosa.pyin", fast_pyin)
 
-    def slow_ml(audio, sr):
+    from pipeline.gender.ml import GenderMLClassifier
+
+    def slow_ml(self, audio, sr):
         time.sleep(0.05)  # ML "takes" 50ms; pitch (stubbed pyin) is near-instant.
         return ("female", 0.9)
-    monkeypatch.setattr("pipeline.gender_ml.classify_audio", slow_ml)
+    monkeypatch.setattr(GenderMLClassifier, "classify_audio", slow_ml)
 
     from pipeline import gender as g
     low = _tone(120.0)
@@ -210,10 +217,12 @@ def test_ensemble_does_not_warn_when_ml_fast(monkeypatch, caplog):
     monkeypatch.setattr("config.settings.GENDER_CLASSIFIER", "ensemble")
     monkeypatch.setattr("config.settings.GENDER_ML_TIME_BUDGET_RATIO", 5.0)
 
-    def fast_ml(audio, sr):
+    from pipeline.gender.ml import GenderMLClassifier
+
+    def fast_ml(self, audio, sr):
         # No sleep — returns near-instantly, well within the budget.
         return ("female", 0.9)
-    monkeypatch.setattr("pipeline.gender_ml.classify_audio", fast_ml)
+    monkeypatch.setattr(GenderMLClassifier, "classify_audio", fast_ml)
 
     from pipeline import gender as g
     low = _tone(120.0)
@@ -235,10 +244,11 @@ def test_detect_genders_ensemble_falls_back_to_pitch_when_ml_errors(monkeypatch,
     caplog.set_level(logging.WARNING, logger="pipeline.gender")
     monkeypatch.setattr("config.settings.GENDER_CLASSIFIER", "ensemble")
     from pipeline import gender as g
+    from pipeline.gender.ml import GenderMLClassifier
 
-    def boom(audio, sr):
+    def boom(self, audio, sr):
         raise RuntimeError("simulated wav2vec2 OOM")
-    monkeypatch.setattr("pipeline.gender_ml.classify_audio", boom)
+    monkeypatch.setattr(GenderMLClassifier, "classify_audio", boom)
 
     low = _tone(120.0)
     ann = Annotation()
