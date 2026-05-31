@@ -62,7 +62,7 @@ class Diarizer:
         tensor = torch.from_numpy(np.ascontiguousarray(wav2d))
         with torch.inference_mode():
             result = pipe({"waveform": tensor, "sample_rate": sr})
-        annotation = getattr(result, "speaker_diarization", result)
+        annotation = result if isinstance(result, Annotation) else result.speaker_diarization
         speakers = annotation.labels()
         log.info("Diarized %d speaker(s): %s", len(speakers), speakers)
         return annotation
@@ -95,52 +95,3 @@ class Diarizer:
                 best_speaker = speaker
         return best_speaker
 
-
-# ---------------------------------------------------------------------------
-# Module-level backward-compat shims so tests and callers that use
-# pipeline.diarize.get_pipeline / pipeline.diarize.diarize_waveform continue
-# to work.
-#
-# IMPORTANT: ``diarize_waveform`` calls the module-level ``get_pipeline()``
-# directly so that tests which do
-#   monkeypatch.setattr(diarize, "get_pipeline", lambda: fake)
-# intercept the call correctly.
-# ---------------------------------------------------------------------------
-
-from config import settings as _settings  # noqa: E402
-
-_default_diarizer = Diarizer(_settings)
-
-# Keep a module-level reference so tests can monkeypatch it.
-_pipeline: Pipeline | None = None
-_lock = _default_diarizer._lock
-
-
-def get_pipeline() -> Pipeline:
-    global _pipeline
-    result = _default_diarizer.get_pipeline()
-    _pipeline = result
-    return result
-
-
-def diarize_waveform(waveform: np.ndarray, sr: int) -> Annotation:
-    """Module-level shim — uses the module-level get_pipeline() so tests can monkeypatch it."""
-    pipe = get_pipeline()
-    waveform = waveform.astype(np.float32, copy=False)
-    wav2d = waveform[np.newaxis, :] if waveform.ndim == 1 else waveform
-    tensor = torch.from_numpy(np.ascontiguousarray(wav2d))
-    with torch.inference_mode():
-        result = pipe({"waveform": tensor, "sample_rate": sr})
-    annotation = getattr(result, "speaker_diarization", result)
-    speakers = annotation.labels()
-    log.info("Diarized %d speaker(s): %s", len(speakers), speakers)
-    return annotation
-
-
-def diarize(audio_path: Path) -> Annotation:
-    data, sr = sf.read(str(audio_path), dtype="float32", always_2d=True)
-    return diarize_waveform(data.T, sr)  # data.T -> (channel, time)
-
-
-def assign_speaker(segment: Segment, diarization: Annotation) -> str | None:
-    return _default_diarizer.assign_speaker(segment, diarization)

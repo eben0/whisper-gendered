@@ -5,7 +5,6 @@ from pathlib import Path
 from pyannote.core import Annotation, Segment as PSegment
 
 import src.server as server
-from src import orchestrator
 from src.orchestrator import Orchestrator
 from src.artifacts import PipelineArtifacts
 from pipeline.transcribe import Segment
@@ -55,6 +54,9 @@ class _FakeBackend:
     async def warmup(self):
         pass
 
+    def is_(self, backend_type):
+        return False
+
 
 class _FakeAudio:
     """Audio stub whose load_wav_mono is replaceable per-test."""
@@ -74,6 +76,21 @@ class _FakeAudio:
         pass
 
 
+def _make_orc(monkeypatch, segments, gender_aware, fake_audio=None, fake_backend=None):
+    """Build an Orchestrator with settings patched and all ML components faked out."""
+    monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Hebrew" if gender_aware else "Japanese")
+    monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 5)
+    monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
+
+    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc._transcriber = _FakeTranscriber(segments)
+    if fake_audio is not None:
+        orc._audio = fake_audio
+    if fake_backend is not None:
+        orc._backend = fake_backend
+    return orc
+
+
 @pytest.fixture
 def two_chunk_segments():
     # Two 6s segments -> with target 5s these land in separate chunks.
@@ -83,24 +100,12 @@ def two_chunk_segments():
     ]
 
 
-def _install_fakes(monkeypatch, segments, gender_aware):
-    monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Hebrew" if gender_aware else "Japanese")
-    monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 5)
-    monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
-
+@pytest.mark.asyncio
+async def test_gender_aware_preserves_order_and_applies_gender(monkeypatch, two_chunk_segments):
     def fake_diarize(waveform, sr):
         ann = Annotation()
         ann[PSegment(0.0, 6.0)] = "SPEAKER_00"
         return ann
-
-    monkeypatch.setattr(orchestrator.diarize, "diarize_waveform", fake_diarize)
-    monkeypatch.setattr(orchestrator.diarize, "assign_speaker", lambda seg, ann: "SPEAKER_00")
-    monkeypatch.setattr(orchestrator.gender, "detect_genders", lambda audio, sr, ann: {"SPEAKER_00": "female"})
-
-
-@pytest.mark.asyncio
-async def test_gender_aware_preserves_order_and_applies_gender(monkeypatch, two_chunk_segments):
-    _install_fakes(monkeypatch, two_chunk_segments, gender_aware=True)
 
     async def fake_translate(texts, gender, target, addressee_gender=None, source_language="English", previous_context=None):
         return [f"{t}|{gender}" for t in texts]
@@ -110,8 +115,12 @@ async def test_gender_aware_preserves_order_and_applies_gender(monkeypatch, two_
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
-                       transcriber=_FakeTranscriber(two_chunk_segments))
+    orc = _make_orc(monkeypatch, two_chunk_segments, gender_aware=True,
+                    fake_audio=fake_audio, fake_backend=fake_backend)
+    monkeypatch.setattr(orc._diarizer, "diarize_waveform", fake_diarize)
+    monkeypatch.setattr(orc._diarizer, "assign_speaker", lambda seg, ann: "SPEAKER_00")
+    monkeypatch.setattr(orc._gender_detector, "detect_genders", lambda audio, sr, ann: {"SPEAKER_00": "female"})
+
     source, target = await orc.run_pipeline(Path("ignored.wav"), "en")
     # Source list keeps the raw transcript text.
     assert [s.text for s in source] == ["hello", "world"]
@@ -124,9 +133,9 @@ async def test_gender_aware_preserves_order_and_applies_gender(monkeypatch, two_
 
 @pytest.mark.asyncio
 async def test_plain_translate_no_diarization(monkeypatch, two_chunk_segments):
-    _install_fakes(monkeypatch, two_chunk_segments, gender_aware=False)
-    # If diarization were called in the plain path this would raise.
-    monkeypatch.setattr(orchestrator.diarize, "diarize_waveform", lambda *a: (_ for _ in ()).throw(AssertionError("diarize called in plain path")))
+    monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "Japanese")
+    monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 5)
+    monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
 
     async def fake_translate(texts, gender, target, addressee_gender=None, source_language="English", previous_context=None):
         return [f"{t}|{gender}" for t in texts]
@@ -137,8 +146,14 @@ async def test_plain_translate_no_diarization(monkeypatch, two_chunk_segments):
         raise AssertionError("_load_wav_mono called in plain path")
     fake_audio = _FakeAudio(raise_on_load)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
-                       transcriber=_FakeTranscriber(two_chunk_segments))
+    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc._transcriber = _FakeTranscriber(two_chunk_segments)
+    orc._audio = fake_audio
+    orc._backend = fake_backend
+    # If diarization were called in the plain path this would raise.
+    monkeypatch.setattr(orc._diarizer, "diarize_waveform",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("diarize called in plain path")))
+
     source, target = await orc.run_pipeline(Path("ignored.wav"), "en")
     assert [s.text for s in source] == ["hello", "world"]
     assert [s.text for s in target] == ["hello|None", "world|None"]
@@ -147,8 +162,12 @@ async def test_plain_translate_no_diarization(monkeypatch, two_chunk_segments):
 @pytest.mark.asyncio
 async def test_transcription_only_when_target_none(monkeypatch, two_chunk_segments):
     monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "none")
-    orc = Orchestrator(_FakeConcurrencyMgr(), _FakeAudio(), _FakeBackend(),
-                       transcriber=_FakeTranscriber(two_chunk_segments))
+
+    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc._transcriber = _FakeTranscriber(two_chunk_segments)
+    orc._audio = _FakeAudio()
+    orc._backend = _FakeBackend()
+
     source, target = await orc.run_pipeline(Path("ignored.wav"), "en")
     # Translation disabled -> target is None, source is the raw transcript.
     assert target is None
@@ -169,9 +188,6 @@ async def test_chunk_local_offset_maps_speakers(monkeypatch, two_chunk_segments)
         ann[PSegment(0.0, 6.0)] = "S"  # slice-local turn
         return ann
 
-    monkeypatch.setattr(orchestrator.diarize, "diarize_waveform", fake_diarize)
-    monkeypatch.setattr(orchestrator.gender, "detect_genders", lambda audio, sr, ann: {"S": "female"})
-
     async def fake_translate(texts, gender, target, addressee_gender=None, source_language="English", previous_context=None):
         return [f"{t}|{gender}" for t in texts]
 
@@ -180,8 +196,13 @@ async def test_chunk_local_offset_maps_speakers(monkeypatch, two_chunk_segments)
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
-                       transcriber=_FakeTranscriber(two_chunk_segments))
+    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc._transcriber = _FakeTranscriber(two_chunk_segments)
+    orc._audio = fake_audio
+    orc._backend = fake_backend
+    monkeypatch.setattr(orc._diarizer, "diarize_waveform", fake_diarize)
+    monkeypatch.setattr(orc._gender_detector, "detect_genders", lambda audio, sr, ann: {"S": "female"})
+
     _, target = await orc.run_pipeline(Path("ignored.wav"), "en")
     # Chunk 2's segment is absolute 6-12. Only if chunk_start (6.0) is subtracted
     # does its local midpoint (3.0) fall inside the [0,6) turn -> speaker "S" ->
@@ -207,11 +228,6 @@ async def test_addressee_rotates_within_chunk(monkeypatch):
     ann[PSegment(0.0, 1.0)] = "S_M1"
     ann[PSegment(1.0, 2.0)] = "S_F"
     ann[PSegment(2.0, 3.0)] = "S_M2"
-    monkeypatch.setattr(orchestrator.diarize, "diarize_waveform", lambda *a, **k: ann)
-    monkeypatch.setattr(
-        orchestrator.gender, "detect_genders",
-        lambda audio, sr, a: {"S_M1": "male", "S_F": "female", "S_M2": "male"},
-    )
 
     addressees: list[str | None] = []
 
@@ -224,8 +240,14 @@ async def test_addressee_rotates_within_chunk(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
-                       transcriber=_FakeTranscriber(segs))
+    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc._transcriber = _FakeTranscriber(segs)
+    orc._audio = fake_audio
+    orc._backend = fake_backend
+    monkeypatch.setattr(orc._diarizer, "diarize_waveform", lambda *a, **k: ann)
+    monkeypatch.setattr(orc._gender_detector, "detect_genders",
+                        lambda audio, sr, a: {"S_M1": "male", "S_F": "female", "S_M2": "male"})
+
     _, target = await orc.run_pipeline(Path("ignored.wav"), "en")
     # Three groups -> three translate calls, addressee = previous group's speaker gender.
     # First group: no prior speaker at all -> None. Then "male", then "female".
@@ -256,14 +278,12 @@ async def test_addressee_carries_across_chunks(monkeypatch):
         ann = Annotation()
         ann[PSegment(0.0, 6.0)] = "S"
         return ann
-    monkeypatch.setattr(orchestrator.diarize, "diarize_waveform", fake_diarize)
 
     chunk_index = {"i": 0}
     def fake_detect(audio, sr, ann):
         result = {"S": "female" if chunk_index["i"] == 0 else "male"}
         chunk_index["i"] += 1
         return result
-    monkeypatch.setattr(orchestrator.gender, "detect_genders", fake_detect)
 
     async def fake_translate(texts, gender, target, addressee_gender=None, source_language="English", previous_context=None):
         return [f"{t}|{gender}|{addressee_gender}" for t in texts]
@@ -273,8 +293,13 @@ async def test_addressee_carries_across_chunks(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
-                       transcriber=_FakeTranscriber(segs))
+    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc._transcriber = _FakeTranscriber(segs)
+    orc._audio = fake_audio
+    orc._backend = fake_backend
+    monkeypatch.setattr(orc._diarizer, "diarize_waveform", fake_diarize)
+    monkeypatch.setattr(orc._gender_detector, "detect_genders", fake_detect)
+
     _, target = await orc.run_pipeline(Path("ignored.wav"), "en")
     # Output order is preserved by the orchestrator's final list comprehension.
     # Chunk 1's segment "a": speaker female, addressee None (first chunk's first group).
@@ -304,7 +329,6 @@ async def test_addressee_does_not_carry_across_chunks(monkeypatch):
         ann = Annotation()
         ann[PSegment(0.0, 6.0)] = "S"
         return ann
-    monkeypatch.setattr(orchestrator.diarize, "diarize_waveform", fake_diarize)
 
     chunk_idx = {"i": 0}
     def fake_detect(audio, sr, ann):
@@ -313,7 +337,6 @@ async def test_addressee_does_not_carry_across_chunks(monkeypatch):
         result = {"S": "female" if chunk_idx["i"] == 0 else "male"}
         chunk_idx["i"] += 1
         return result
-    monkeypatch.setattr(orchestrator.gender, "detect_genders", fake_detect)
 
     addressees: list[str | None] = []
     async def fake_translate(texts, gender, target,
@@ -327,8 +350,13 @@ async def test_addressee_does_not_carry_across_chunks(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
-                       transcriber=_FakeTranscriber(segs))
+    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc._transcriber = _FakeTranscriber(segs)
+    orc._audio = fake_audio
+    orc._backend = fake_backend
+    monkeypatch.setattr(orc._diarizer, "diarize_waveform", fake_diarize)
+    monkeypatch.setattr(orc._gender_detector, "detect_genders", fake_detect)
+
     await orc.run_pipeline(Path("ignored.wav"), "en")
 
     # Two chunks, one group each — both first-of-chunk, so addressee None.
@@ -356,11 +384,6 @@ async def test_addressee_hint_disabled_by_flag(monkeypatch):
     ann[PSegment(0.0, 1.0)] = "S_M1"
     ann[PSegment(1.0, 2.0)] = "S_F"
     ann[PSegment(2.0, 3.0)] = "S_M2"
-    monkeypatch.setattr(orchestrator.diarize, "diarize_waveform", lambda *a, **k: ann)
-    monkeypatch.setattr(
-        orchestrator.gender, "detect_genders",
-        lambda audio, sr, a: {"S_M1": "male", "S_F": "female", "S_M2": "male"},
-    )
 
     addressees: list[str | None] = []
 
@@ -373,8 +396,14 @@ async def test_addressee_hint_disabled_by_flag(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
-                       transcriber=_FakeTranscriber(segs))
+    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc._transcriber = _FakeTranscriber(segs)
+    orc._audio = fake_audio
+    orc._backend = fake_backend
+    monkeypatch.setattr(orc._diarizer, "diarize_waveform", lambda *a, **k: ann)
+    monkeypatch.setattr(orc._gender_detector, "detect_genders",
+                        lambda audio, sr, a: {"S_M1": "male", "S_F": "female", "S_M2": "male"})
+
     _, target = await orc.run_pipeline(Path("ignored.wav"), "en")
     # Flag off -> every call sees addressee_gender=None regardless of rotation.
     assert addressees == [None, None, None]
@@ -392,8 +421,6 @@ async def test_source_language_from_request_reaches_translator(monkeypatch):
 
     ann = Annotation()
     ann[PSegment(0.0, 1.0)] = "S"
-    monkeypatch.setattr(orchestrator.diarize, "diarize_waveform", lambda *a, **k: ann)
-    monkeypatch.setattr(orchestrator.gender, "detect_genders", lambda audio, sr, a: {"S": "male"})
 
     received: list[str] = []
 
@@ -406,8 +433,13 @@ async def test_source_language_from_request_reaches_translator(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
-                       transcriber=_FakeTranscriber(segs))
+    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc._transcriber = _FakeTranscriber(segs)
+    orc._audio = fake_audio
+    orc._backend = fake_backend
+    monkeypatch.setattr(orc._diarizer, "diarize_waveform", lambda *a, **k: ann)
+    monkeypatch.setattr(orc._gender_detector, "detect_genders", lambda audio, sr, a: {"S": "male"})
+
     _, target = await orc.run_pipeline(Path("ignored.wav"), "fr")
     assert received == ["French"]
     assert [s.text for s in target] == ["x|French"]
@@ -431,8 +463,6 @@ async def test_pipeline_preserves_source_alongside_translation(monkeypatch):
     ann = Annotation()
     ann[PSegment(0.0, 1.0)] = "S"
     ann[PSegment(1.0, 2.0)] = "S"
-    monkeypatch.setattr(orchestrator.diarize, "diarize_waveform", lambda *a, **k: ann)
-    monkeypatch.setattr(orchestrator.gender, "detect_genders", lambda audio, sr, a: {"S": "male"})
 
     async def fake_translate(texts, gender, target, addressee_gender=None, source_language="English", previous_context=None):
         return [f"HE:{t}" for t in texts]
@@ -442,8 +472,13 @@ async def test_pipeline_preserves_source_alongside_translation(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
-                       transcriber=_FakeTranscriber(segs))
+    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc._transcriber = _FakeTranscriber(segs)
+    orc._audio = fake_audio
+    orc._backend = fake_backend
+    monkeypatch.setattr(orc._diarizer, "diarize_waveform", lambda *a, **k: ann)
+    monkeypatch.setattr(orc._gender_detector, "detect_genders", lambda audio, sr, a: {"S": "male"})
+
     source, target = await orc.run_pipeline(Path("ignored.wav"), "en")
 
     # English transcript preserved verbatim.
@@ -539,10 +574,6 @@ async def test_orchestrator_logs_segment_counts(monkeypatch, caplog):
 
     ann = Annotation()
     ann[PSegment(0.0, 3.0)] = "S"
-    monkeypatch.setattr(orchestrator.diarize, "diarize_waveform",
-                        lambda *a, **k: ann)
-    monkeypatch.setattr(orchestrator.gender, "detect_genders",
-                        lambda audio, sr, a: {"S": "male"})
 
     async def fake_translate(texts, gender, target,
                              addressee_gender=None, source_language="English",
@@ -554,8 +585,13 @@ async def test_orchestrator_logs_segment_counts(monkeypatch, caplog):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
-                       transcriber=_FakeTranscriber(segs))
+    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc._transcriber = _FakeTranscriber(segs)
+    orc._audio = fake_audio
+    orc._backend = fake_backend
+    monkeypatch.setattr(orc._diarizer, "diarize_waveform", lambda *a, **k: ann)
+    monkeypatch.setattr(orc._gender_detector, "detect_genders", lambda audio, sr, a: {"S": "male"})
+
     await orc.run_pipeline(Path("ignored.wav"), "en")
 
     msgs = [r.getMessage() for r in caplog.records]
@@ -590,10 +626,6 @@ async def test_orchestrator_logs_error_on_segment_count_mismatch(monkeypatch, ca
 
     ann = Annotation()
     ann[PSegment(0.0, 3.0)] = "S"
-    monkeypatch.setattr(orchestrator.diarize, "diarize_waveform",
-                        lambda *a, **k: ann)
-    monkeypatch.setattr(orchestrator.gender, "detect_genders",
-                        lambda audio, sr, a: {"S": "male"})
 
     # Simulate a chunked-translate flow that loses one segment. The
     # existing alignment fallback in pipeline/translate.py pads with the
@@ -616,8 +648,11 @@ async def test_orchestrator_logs_error_on_segment_count_mismatch(monkeypatch, ca
         load_fn=lambda path: (np.zeros(16000 * 4, dtype=np.float32), 16000)
     )
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, _FakeBackend(),
-                       transcriber=_FakeTranscriber(segs))
+    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc._transcriber = _FakeTranscriber(segs)
+    orc._audio = fake_audio
+    orc._backend = _FakeBackend()
+
     await orc.run_pipeline(Path("ignored.wav"), "en")
 
     err_msgs = [r.getMessage() for r in caplog.records
@@ -690,10 +725,6 @@ async def test_translate_context_window_is_passed_to_each_batch(monkeypatch):
     ann = Annotation()
     for i in range(5):
         ann[PSegment(float(i), float(i+1))] = f"S{i}"
-    monkeypatch.setattr(orchestrator.diarize, "diarize_waveform",
-                        lambda *a, **k: ann)
-    monkeypatch.setattr(orchestrator.gender, "detect_genders",
-                        lambda audio, sr, a: {f"S{i}": "male" for i in range(5)})
 
     received: list[list[str]] = []
     async def fake_translate(texts, gender, target,
@@ -707,8 +738,14 @@ async def test_translate_context_window_is_passed_to_each_batch(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
-                       transcriber=_FakeTranscriber(segs))
+    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc._transcriber = _FakeTranscriber(segs)
+    orc._audio = fake_audio
+    orc._backend = fake_backend
+    monkeypatch.setattr(orc._diarizer, "diarize_waveform", lambda *a, **k: ann)
+    monkeypatch.setattr(orc._gender_detector, "detect_genders",
+                        lambda audio, sr, a: {f"S{i}": "male" for i in range(5)})
+
     await orc.run_pipeline(Path("ignored.wav"), "en")
 
     # Context window now carries (speaker_gender, target_text) tuples.
@@ -742,10 +779,6 @@ async def test_translate_context_disabled_when_setting_zero(monkeypatch):
     ann = Annotation()
     ann[PSegment(0.0, 1.0)] = "S0"
     ann[PSegment(1.0, 2.0)] = "S1"
-    monkeypatch.setattr(orchestrator.diarize, "diarize_waveform",
-                        lambda *a, **k: ann)
-    monkeypatch.setattr(orchestrator.gender, "detect_genders",
-                        lambda audio, sr, a: {"S0": "male", "S1": "male"})
 
     received = []
     async def fake_translate(texts, gender, target,
@@ -759,8 +792,14 @@ async def test_translate_context_disabled_when_setting_zero(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), fake_audio, fake_backend,
-                       transcriber=_FakeTranscriber(segs))
+    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc._transcriber = _FakeTranscriber(segs)
+    orc._audio = fake_audio
+    orc._backend = fake_backend
+    monkeypatch.setattr(orc._diarizer, "diarize_waveform", lambda *a, **k: ann)
+    monkeypatch.setattr(orc._gender_detector, "detect_genders",
+                        lambda audio, sr, a: {"S0": "male", "S1": "male"})
+
     await orc.run_pipeline(Path("ignored.wav"), "en")
     # Every call must see empty context.
     assert all(c == [] for c in received), received
@@ -791,8 +830,11 @@ async def test_translate_context_window_threads_through_plain_translate(monkeypa
 
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), _FakeAudio(), fake_backend,
-                       transcriber=_FakeTranscriber(segs))
+    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc._transcriber = _FakeTranscriber(segs)
+    orc._audio = _FakeAudio()
+    orc._backend = fake_backend
+
     await orc.run_pipeline(Path("ignored.wav"), "en")
 
     # Chunk 1 (A): empty context.
@@ -889,9 +931,6 @@ async def test_alt_classifier_reuses_artifacts_without_retranscribe(monkeypatch)
         def model_loaded(self):
             return True
 
-    monkeypatch.setattr(orchestrator.diarize, "diarize_waveform",
-                        lambda *a, **k: diarize_calls.append(a) or None)
-
     # Stub _run_gender_aware to (a) capture its precomputed_annotations
     # arg and (b) return without touching real diarize.
     captured: dict = {}
@@ -916,8 +955,11 @@ async def test_alt_classifier_reuses_artifacts_without_retranscribe(monkeypatch)
         annotations=[sentinel_ann_chunk0],
     )
 
-    orc = Orchestrator(_FakeConcurrencyMgr(), _FakeAudio(), _FakeBackend(),
-                       transcriber=_CountingTranscriber())
+    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc._transcriber = _CountingTranscriber()
+    monkeypatch.setattr(orc._diarizer, "diarize_waveform",
+                        lambda *a, **k: diarize_calls.append(a) or None)
+
     source, target = await orc.run_pipeline_alt_classifier(
         Path("ignored.wav"), "en", artifacts,
     )

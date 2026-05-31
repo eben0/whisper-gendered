@@ -16,15 +16,10 @@ from fastapi.responses import PlainTextResponse
 from pipeline.format import render
 from pipeline.lang import language_name
 from src.artifacts import PipelineArtifacts
-from src.config import settings
 from src.side_file import ALT_CLASSIFIER_SRT_SUFFIX
 
 if TYPE_CHECKING:
-    from src.core.concurrency import ConcurrencyManager
-    from src.core.cuda import Cuda
-    from src.audio import Audio
-    from src.side_file import SideFile
-    from src.orchestrator import Orchestrator
+    from src.config import Settings
 
 log = logging.getLogger("asr_handler")
 
@@ -34,21 +29,76 @@ class AsrHandler:
 
     All business logic (file I/O, audio prep, pipeline execution, side-file
     saves) lives here. The FastAPI route handler is a one-liner.
+
+    ``__init__`` creates all dependencies internally. Lazy imports are used
+    so that cuda.bootstrap() has already run (in server.py) before any
+    pyannote/pipeline import occurs.
     """
 
-    def __init__(
-        self,
-        concurrency: "ConcurrencyManager",
-        cuda: "Cuda",
-        audio: "Audio",
-        side_file: "SideFile",
-        orchestrator: "Orchestrator",
-    ) -> None:
-        self._concurrency = concurrency
-        self._cuda = cuda
-        self._audio = audio
-        self._side_file = side_file
-        self._orchestrator = orchestrator
+    def __init__(self, settings: "Settings") -> None:
+        # Lazy imports to ensure cuda.bootstrap() has already run before
+        # any pyannote/pipeline import occurs. bootstrap() is called in server.py
+        # before AsrHandler is instantiated.
+        from src.core.concurrency import ConcurrencyManager
+        from src.audio import Audio
+        from src.side_file import SideFile
+        from src.core.cuda import Cuda
+        from src.orchestrator import Orchestrator
+
+        self._settings = settings
+        self._cuda = Cuda()
+        self._concurrency = ConcurrencyManager(settings.CONCURRENT_JOBS)
+        self._audio = Audio()
+        self._side_file = SideFile(settings)
+        self._orchestrator = Orchestrator(settings, self._concurrency)
+
+    def job_depth(self) -> int:
+        return self._concurrency.job_depth()
+
+    def model_loaded(self) -> bool:
+        return self._orchestrator._transcriber.model_loaded()
+
+    async def warmup(self) -> None:
+        """Pre-load all ML models. Merges what was previously in Lifecycle."""
+        import tempfile as _tempfile
+        import uuid as _uuid
+        settings = self._settings
+        log.info(
+            "Starting up. model=%s device=%s target_language=%s gender_aware=%s "
+            "translation_backend=%s",
+            settings.WHISPER_MODEL, settings.DEVICE, settings.TARGET_LANGUAGE,
+            settings.is_gender_aware(), settings.TRANSLATION_BACKEND,
+        )
+        tmp = Path(_tempfile.gettempdir()) / f"warmup_{_uuid.uuid4().hex}.wav"
+        try:
+            self._audio.write_silent_wav(tmp)
+            await self._concurrency.run_in_thread(
+                self._orchestrator._transcriber.warmup, tmp
+            )
+            if settings.is_gender_aware():
+                try:
+                    await self._concurrency.run_in_thread(
+                        self._orchestrator._diarizer.diarize, tmp
+                    )
+                    log.info("Pyannote warm-up complete.")
+                except Exception:
+                    log.exception("Pyannote warm-up failed (continuing anyway).")
+            if (
+                settings.GENDER_CLASSIFIER.strip().lower() in ("ml", "ensemble")
+                and settings.is_gender_aware()
+            ):
+                try:
+                    await self._concurrency.run_in_thread(
+                        self._orchestrator._gender_ml.warmup
+                    )
+                except Exception:
+                    log.exception("gender_ml warm-up failed; falling back to lazy load.")
+            if self._orchestrator._backend.is_("local"):
+                await self._concurrency.run_in_thread(
+                    self._orchestrator._backend.warmup
+                )
+        finally:
+            tmp.unlink(missing_ok=True)
 
     async def handle(
         self,
@@ -65,6 +115,8 @@ class AsrHandler:
         Passed explicitly so the handler has no dependency on the HTTP
         ``Request`` object and can be called from a CLI with explicit args.
         """
+        settings = self._settings  # use the injected settings singleton
+
         request_id = uuid.uuid4().hex[:8]
         workdir = Path(tempfile.mkdtemp(prefix=f"asr_{request_id}_"))
         raw_path = workdir / (audio_file.filename or "input")

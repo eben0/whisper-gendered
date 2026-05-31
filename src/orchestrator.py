@@ -14,18 +14,18 @@ from typing import Any, TYPE_CHECKING
 
 from src.artifacts import PipelineArtifacts
 from src.config import settings
-from pipeline import diarize, gender
 from pipeline.chunk import make_chunks
 from pipeline.lang import language_name
 from pipeline.segment import Segment
-from pipeline.transcribe import Transcriber
-from pipeline.diarize import Diarizer
-from pipeline.gender import GenderDetector
 
 if TYPE_CHECKING:
     from src.core.concurrency import ConcurrencyManager
     from src.audio import Audio
     from src.backends.factory import TranslationBackend
+    from pipeline.transcribe import Transcriber
+    from pipeline.diarize import Diarizer
+    from pipeline.gender.pitch import GenderDetector
+    from pipeline.gender.ml import GenderMLClassifier
 
 log = logging.getLogger("orchestrator")
 
@@ -33,25 +33,30 @@ log = logging.getLogger("orchestrator")
 class Orchestrator:
     """Stateless orchestration of the full transcribe→diarize→translate pipeline.
 
-    Dependencies are injected at construction. The instance holds no mutable
+    Dependencies are created internally. The instance holds no mutable
     pipeline state — all state is local to each call.
     """
 
     def __init__(
         self,
-        concurrency_mgr: "ConcurrencyManager",
-        audio_obj: "Audio",
-        backend: "TranslationBackend",
-        transcriber: "Transcriber | None" = None,
-        diarizer: "Diarizer | None" = None,
-        gender_detector: "GenderDetector | None" = None,
+        settings_: "Any",
+        concurrency: "ConcurrencyManager",
     ) -> None:
-        self._concurrency = concurrency_mgr
-        self._audio = audio_obj
-        self._backend = backend
-        self._transcriber = transcriber
-        self._diarizer = diarizer
-        self._gender_detector = gender_detector
+        from pipeline.transcribe import Transcriber
+        from pipeline.diarize import Diarizer
+        from pipeline.gender.ml import GenderMLClassifier
+        from pipeline.gender.pitch import GenderDetector
+        from src.audio import Audio
+        from src.backends.factory import create_backend
+
+        self._settings = settings_
+        self._concurrency = concurrency
+        self._transcriber: Transcriber = Transcriber(settings_)
+        self._diarizer: Diarizer = Diarizer(settings_)
+        self._gender_ml: GenderMLClassifier = GenderMLClassifier(settings_)
+        self._gender_detector: GenderDetector = GenderDetector(settings_, gender_ml=self._gender_ml)
+        self._audio: Audio = Audio()
+        self._backend: TranslationBackend = create_backend(settings_)
 
     # ------------------------------------------------------------------
     # Public API
@@ -85,10 +90,6 @@ class Orchestrator:
         leave the parameter at its default and observe no behavior change.
         """
         t0 = time.monotonic()
-        if self._transcriber is None:
-            raise RuntimeError(
-                "Orchestrator requires a Transcriber instance; got None."
-            )
         segments = await self._concurrency.run_in_thread(
             self._transcriber.transcribe, audio_path, language
         )
@@ -277,16 +278,8 @@ class Orchestrator:
         i0 = max(0, int(start * sr))
         i1 = min(len(audio), int(end * sr))
         slice_ = audio[i0:i1]
-        _diarize_fn = (
-            self._diarizer.diarize_waveform if self._diarizer is not None
-            else diarize.diarize_waveform
-        )
-        _gender_fn = (
-            self._gender_detector.detect_genders if self._gender_detector is not None
-            else gender.detect_genders
-        )
-        annotation = _diarize_fn(slice_, sr)
-        genders = _gender_fn(slice_, sr, annotation)
+        annotation = self._diarizer.diarize_waveform(slice_, sr)
+        genders = self._gender_detector.detect_genders(slice_, sr, annotation)
         return annotation, genders
 
     async def _translate_chunk(
@@ -427,13 +420,8 @@ class Orchestrator:
                     i0 = max(0, int(chunk.start * sr))
                     i1 = min(len(waveform), int(chunk.end * sr))
                     slice_ = waveform[i0:i1]
-                    _gender_fn = (
-                        self._gender_detector.detect_genders
-                        if self._gender_detector is not None
-                        else gender.detect_genders
-                    )
                     genders = await self._concurrency.run_in_thread(
-                        _gender_fn, slice_, sr, annotation,
+                        self._gender_detector.detect_genders, slice_, sr, annotation,
                     )
                     log.info(
                         "chunk %d/%d alt-pass gender only (%d speakers; "
@@ -451,13 +439,9 @@ class Orchestrator:
                 annotations_used.append(annotation)
                 # Build chunk-local assignment + groups.
                 assigned: list[tuple[Segment, str | None]] = []
-                _assign_fn = (
-                    self._diarizer.assign_speaker if self._diarizer is not None
-                    else diarize.assign_speaker
-                )
                 for seg in chunk.segments:
                     local = Segment(seg.start - chunk.start, seg.end - chunk.start, seg.text)
-                    assigned.append((seg, _assign_fn(local, annotation)))
+                    assigned.append((seg, self._diarizer.assign_speaker(local, annotation)))
                 groups = self._group_consecutive(assigned)
                 tasks.append(asyncio.create_task(
                     self._translate_chunk(
@@ -538,37 +522,3 @@ class Orchestrator:
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
         return [seg for chunk in chunks for seg in chunk.segments]
-
-
-# ---------------------------------------------------------------------------
-# Module-level backward-compat shims so callers that import and invoke
-# ``orchestrator.run_pipeline_async(...)`` directly continue to work.
-# The shims construct a temporary Orchestrator and delegate immediately.
-# ---------------------------------------------------------------------------
-
-async def run_pipeline_async(
-    audio_path: Path,
-    language: str,
-    *,
-    concurrency_mgr,
-    audio_obj,
-    backend,
-    _artifacts_out: list[PipelineArtifacts] | None = None,
-) -> tuple[list[Segment], list[Segment] | None]:
-    """Backward-compat shim — delegates to ``Orchestrator.run_pipeline``."""
-    orc = Orchestrator(concurrency_mgr, audio_obj, backend)
-    return await orc.run_pipeline(audio_path, language, _artifacts_out=_artifacts_out)
-
-
-async def run_pipeline_alt_classifier(
-    audio_path: Path,
-    language: str,
-    artifacts: PipelineArtifacts,
-    *,
-    concurrency_mgr,
-    audio_obj,
-    backend,
-) -> tuple[list[Segment], list[Segment] | None]:
-    """Backward-compat shim — delegates to ``Orchestrator.run_pipeline_alt_classifier``."""
-    orc = Orchestrator(concurrency_mgr, audio_obj, backend)
-    return await orc.run_pipeline_alt_classifier(audio_path, language, artifacts)

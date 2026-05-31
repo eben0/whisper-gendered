@@ -12,6 +12,7 @@ import threading
 from pathlib import Path
 
 from faster_whisper import WhisperModel
+from faster_whisper.transcribe import TranscriptionInfo  # noqa: F401 — typed return from model.transcribe()
 
 from pipeline.segment import Segment  # re-export: keeps pipeline.transcribe.Segment valid
 
@@ -77,15 +78,15 @@ class Transcriber:
         for s in segments_iter:
             start = s.start
             end = s.end
-            words = getattr(s, "words", None)
+            words = s.words
             if words:
                 start = words[0].start
                 end = words[-1].end
             segments.append(Segment(start=start, end=end, text=s.text.strip()))
         log.info(
             "Transcribed %d segments (detected language=%s, prob=%.2f)",
-            len(segments), getattr(info, "language", language),
-            getattr(info, "language_probability", 0.0),
+            len(segments), info.language if info.language else language,
+            info.language_probability,
         )
         return segments
 
