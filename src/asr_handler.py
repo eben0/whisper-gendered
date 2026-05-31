@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import UploadFile
-from fastapi.requests import Request
 from fastapi.responses import PlainTextResponse
 
 from pipeline.format import render
@@ -53,14 +52,19 @@ class AsrHandler:
 
     async def handle(
         self,
-        request: Request,
         audio_file: UploadFile,
         task: str,
         language: str,
         output: str,
         encode: bool,
+        video_file: str = "",
     ) -> PlainTextResponse:
-        """Process one /asr request. Returns the rendered subtitle response."""
+        """Process one ASR request. Returns the rendered subtitle response.
+
+        ``video_file`` is the Bazarr-provided path used for side-file saves.
+        Passed explicitly so the handler has no dependency on the HTTP
+        ``Request`` object and can be called from a CLI with explicit args.
+        """
         request_id = uuid.uuid4().hex[:8]
         workdir = Path(tempfile.mkdtemp(prefix=f"asr_{request_id}_"))
         raw_path = workdir / (audio_file.filename or "input")
@@ -135,7 +139,7 @@ class AsrHandler:
             # pre-existing English subtitle files are never overwritten by Hebrew.
             body, content_type = render(source_segments, output)
             wall = time.monotonic() - started
-            video_file_url = request.query_params.get("video_file") or ""
+            video_file_url = video_file
 
             if target_segments is not None:
                 # Translated run: render the translation separately for the side-

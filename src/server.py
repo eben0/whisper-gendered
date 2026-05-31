@@ -14,7 +14,7 @@ from src.core.logging_config import configure as _configure_logging
 _configure_logging()
 
 import logging
-from fastapi import FastAPI, File, Query, Request, UploadFile
+from fastapi import FastAPI, File, Query, UploadFile
 from fastapi.responses import JSONResponse
 
 from src.config import settings
@@ -71,14 +71,14 @@ async def status():
 
 @app.post("/asr")
 async def asr(
-    request: Request,
     audio_file: UploadFile = File(...),
     task: str = Query("transcribe"),
     language: str = Query("en"),
     output: str = Query("srt"),
     encode: bool = Query(True),
+    video_file: str = Query(""),
 ):
-    return await _asr_handler.handle(request, audio_file, task, language, output, encode)
+    return await _asr_handler.handle(audio_file, task, language, output, encode, video_file=video_file)
 
 
 if __name__ == "__main__":
