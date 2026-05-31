@@ -7,4 +7,5 @@ $ip = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
 Write-Host ""
 Write-Host "Server running at: http://${ip}:9000"
 Write-Host ""
-python server.py
+$env:PYTHONPATH = "$PSScriptRoot\src"
+python src/server.py
