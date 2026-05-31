@@ -1,132 +1,53 @@
-"""wav2vec2 audio-classification wrapper for speaker gender detection.
+"""Backward-compat shim — the real implementation is in pipeline.gender.ml.
 
-A thin alternative to the pitch-based ``pipeline/gender.py``. We wrap a
-HuggingFace audio-classification model (default
-``alefiury/wav2vec2-large-xlsr-53-gender-recognition-librispeech``) behind a
-lazy, thread-safe singleton so the ~1.2 GB model is loaded at most once per
-process and only on first use.
+Tests and callers that do ``from pipeline import gender_ml`` and then access
+module-level ``get_pipeline``, ``classify_audio``, ``model_loaded``, ``warmup``,
+and ``_pipeline`` continue to work through this module.
 
-Implementation note: we deliberately do NOT use ``transformers.pipeline(
-"audio-classification", ...)``. The HF pipeline helper imports ``torchcodec``,
-whose Windows DLLs cannot be loaded against torch 2.11.0+cu130 in this venv
-(verified during Task 1 pre-flight). Instead we drive ``AutoFeatureExtractor``
-+ ``AutoModelForAudioClassification`` directly and expose a small callable
-whose return shape mirrors the HF pipeline so callers/tests can treat the two
-interchangeably.
+IMPORTANT: ``classify_audio`` calls the module-level ``get_pipeline()`` so that
+tests which do ``monkeypatch.setattr(gender_ml, "get_pipeline", lambda: fake)``
+intercept the call correctly.
 """
 
 from __future__ import annotations
 
-import logging
-import threading
 from typing import Any
 
 import numpy as np
 
-from config import settings
+from pipeline.gender.ml import GenderMLClassifier, _Wav2Vec2GenderPipeline  # noqa: F401
+
+import logging
 
 log = logging.getLogger("pipeline.gender_ml")
 
+from config import settings as _settings  # noqa: E402
+
+_instance = GenderMLClassifier(_settings)
+
+# Module-level _pipeline so tests can do:
+#   monkeypatch.setattr(gender_ml, "_pipeline", None)
+#   monkeypatch.setattr(gender_ml, "_pipeline", object())
+# and model_loaded() / classify_audio() observe it.
 _pipeline: Any | None = None
-_lock = threading.Lock()
-
-
-class _Wav2Vec2GenderPipeline:
-    """Module-private: external callers use ``classify_audio()`` instead.
-
-    Leading underscore is the Python convention for "not part of the public
-    API"; this class exists only to give ``get_pipeline()`` a typed handle for
-    the singleton. ``__call__(payload, top_k=None)`` accepts HF's
-    audio-classification payload — ``{"array": np.ndarray, "sampling_rate":
-    int}`` — and returns ``[{"label": str, "score": float}, ...]`` sorted by
-    descending score.
-    """
-
-    def __init__(self, model: Any, feature_extractor: Any, device: str):
-        self._model = model
-        self._fe = feature_extractor
-        self._device = device
-
-    def __call__(
-        self, payload: dict, top_k: int | None = None
-    ) -> list[dict[str, Any]]:
-        import torch  # local import: tests monkeypatch get_pipeline and never hit here
-
-        inputs = self._fe(
-            payload["array"],
-            sampling_rate=payload["sampling_rate"],
-            return_tensors="pt",
-        )
-        inputs = {k: v.to(self._device) for k, v in inputs.items()}
-        with torch.inference_mode():
-            logits = self._model(**inputs).logits
-        probs = torch.softmax(logits, dim=-1).squeeze(0).detach().cpu().tolist()
-        id2label = self._model.config.id2label
-        rows = [
-            {"label": id2label[i], "score": float(probs[i])}
-            for i in range(len(probs))
-        ]
-        rows.sort(key=lambda r: r["score"], reverse=True)
-        return rows[:top_k] if top_k is not None else rows
+_lock = _instance._lock
 
 
 def get_pipeline() -> Any:
-    """Return the singleton gender classifier, building it on first call.
-
-    Thread-safe (double-checked locking). Heavy imports (``torch``,
-    ``transformers``) happen inside this function so unit tests that
-    monkeypatch ``get_pipeline`` never pay their cost.
-    """
     global _pipeline
-    if _pipeline is not None:
-        return _pipeline
-    with _lock:
-        if _pipeline is not None:
-            return _pipeline
-
-        # Local imports — see docstring above.
-        import torch
-        from transformers import (
-            AutoFeatureExtractor,
-            AutoModelForAudioClassification,
-        )
-
-        device = settings.DEVICE
-        if device == "cuda" and not torch.cuda.is_available():
-            log.warning(
-                "DEVICE=cuda requested but torch.cuda.is_available() is False; "
-                "falling back to CPU for gender ML classifier."
-            )
-            device = "cpu"
-
-        model_id = settings.GENDER_ML_MODEL
-        log.info(
-            "Loading gender ML classifier %s (device=%s)...", model_id, device,
-        )
-        fe = AutoFeatureExtractor.from_pretrained(model_id)
-        model = AutoModelForAudioClassification.from_pretrained(model_id).to(device)
-        # Inference mode. ``model.train(False)`` matches the convention used
-        # by pipeline/translate_local.py — both wrap pre-trained models we
-        # never train in-process.
-        model.train(False)
-
-        _pipeline = _Wav2Vec2GenderPipeline(model, fe, device)
-        log.info("Gender ML classifier loaded.")
-    return _pipeline
+    result = _instance.get_pipeline()
+    _pipeline = result
+    return result
 
 
 def model_loaded() -> bool:
-    """True iff the singleton has been built."""
+    # Read the module-level _pipeline so that monkeypatch.setattr on
+    # ``gender_ml._pipeline`` is observed here.
     return _pipeline is not None
 
 
 def classify_audio(audio: np.ndarray, sr: int) -> tuple[str, float]:
-    """Classify a mono waveform as ``("male"|"female", confidence)``.
-
-    Raises ``ValueError`` if the underlying model returns a label outside
-    ``{"male", "female"}`` so a misconfigured model fails loudly rather than
-    silently mis-routing speakers.
-    """
+    """Classify a mono waveform — calls module-level get_pipeline() so tests can monkeypatch it."""
     pipe = get_pipeline()
     rows = pipe({"array": audio, "sampling_rate": sr})
     winner = rows[0]
@@ -140,11 +61,6 @@ def classify_audio(audio: np.ndarray, sr: int) -> tuple[str, float]:
 
 
 def warmup() -> None:
-    """Eagerly build the singleton so the first request doesn't pay for it.
-
-    Never raises — warm-up failures are logged and swallowed so startup
-    continues even if the model can't be loaded right now.
-    """
     try:
         get_pipeline()
         log.info("Gender ML warm-up complete.")

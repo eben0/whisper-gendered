@@ -25,6 +25,9 @@ from src.side_file import SideFile
 from src.lifecycle import Lifecycle
 from src.orchestrator import Orchestrator
 from src.asr_handler import AsrHandler
+from pipeline.transcribe import Transcriber
+from pipeline.diarize import Diarizer
+from pipeline.gender import GenderDetector, GenderMLClassifier
 
 log = logging.getLogger("server")
 VERSION = "1.0.0"
@@ -34,8 +37,12 @@ _concurrency = ConcurrencyManager(settings.CONCURRENT_JOBS)
 _backend = create_backend(settings)
 _audio = Audio()
 _side_file = SideFile(settings)
-_orchestrator = Orchestrator(_concurrency, _audio, _backend)
-_lifecycle = Lifecycle(_concurrency, _audio, _backend, settings)
+_transcriber = Transcriber(settings)
+_diarizer = Diarizer(settings)
+_gender_ml_classifier = GenderMLClassifier(settings)
+_gender_detector = GenderDetector(settings, gender_ml=_gender_ml_classifier)
+_orchestrator = Orchestrator(_concurrency, _audio, _backend, _transcriber, _diarizer, _gender_detector)
+_lifecycle = Lifecycle(_concurrency, _audio, _backend, settings, _transcriber, _diarizer, _gender_ml_classifier)
 _asr_handler = AsrHandler(_concurrency, _cuda, _audio, _side_file, _orchestrator)
 
 app = FastAPI(title="Gender-Aware Hebrew Subtitle Server", version=VERSION)
@@ -55,11 +62,10 @@ async def root():
 
 @app.get("/status")
 async def status():
-    from pipeline import transcribe
     return JSONResponse({
         "status": "ok",
         "queue_depth": _concurrency.job_depth(),
-        "model_loaded": transcribe.model_loaded(),
+        "model_loaded": _transcriber.model_loaded(),
     })
 
 

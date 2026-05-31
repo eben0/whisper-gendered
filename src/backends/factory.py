@@ -1,7 +1,7 @@
 """Translation backend factory, abstract base class, and type constants.
 
 Merged from: core/backend_base.py + core/backends.py + core/backend_factory.py
-(per PR #2 requirement: merge backends.py + backend_base.py → factory.py).
+(per PR #2 requirement: merge backends.py + backend_base.py -> factory.py).
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.config import Settings
+    from pipeline.translate.local import LocalTranslator
 
 # Named constants — replace all inline "local"/"claude" string literals.
 LOCAL = "local"
@@ -39,7 +40,10 @@ class TranslationBackend(ABC):
     def model_name(self) -> str: ...
 
 
-def create_backend(settings: "Settings") -> TranslationBackend:
+def create_backend(
+    settings: "Settings",
+    local_translator: "LocalTranslator | None" = None,
+) -> TranslationBackend:
     """Instantiate the backend named by ``settings.TRANSLATION_BACKEND``.
 
     No module-level singleton — caller creates and holds the instance.
@@ -52,7 +56,9 @@ def create_backend(settings: "Settings") -> TranslationBackend:
         case "claude":
             return ClaudeBackend(settings)
         case "local":
-            return LocalBackend()
+            from pipeline.translate.local import LocalTranslator
+            translator = local_translator or LocalTranslator(settings)
+            return LocalBackend(translator)
         case other:
             raise ValueError(
                 f"Unknown TRANSLATION_BACKEND {other!r}. Valid: 'claude', 'local'."

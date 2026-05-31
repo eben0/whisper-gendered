@@ -18,6 +18,9 @@ from pipeline import diarize, gender, transcribe
 from pipeline.chunk import make_chunks
 from pipeline.lang import language_name
 from pipeline.segment import Segment
+from pipeline.transcribe import Transcriber
+from pipeline.diarize import Diarizer
+from pipeline.gender import GenderDetector
 
 if TYPE_CHECKING:
     from src.core.concurrency import ConcurrencyManager
@@ -39,10 +42,16 @@ class Orchestrator:
         concurrency_mgr: "ConcurrencyManager",
         audio_obj: "Audio",
         backend: "TranslationBackend",
+        transcriber: "Transcriber | None" = None,
+        diarizer: "Diarizer | None" = None,
+        gender_detector: "GenderDetector | None" = None,
     ) -> None:
         self._concurrency = concurrency_mgr
         self._audio = audio_obj
         self._backend = backend
+        self._transcriber = transcriber
+        self._diarizer = diarizer
+        self._gender_detector = gender_detector
 
     # ------------------------------------------------------------------
     # Public API
@@ -76,7 +85,11 @@ class Orchestrator:
         leave the parameter at its default and observe no behavior change.
         """
         t0 = time.monotonic()
-        segments = await self._concurrency.run_in_thread(transcribe.transcribe, audio_path, language)
+        _transcribe_fn = (
+            self._transcriber.transcribe if self._transcriber is not None
+            else transcribe.transcribe
+        )
+        segments = await self._concurrency.run_in_thread(_transcribe_fn, audio_path, language)
         transcribe_elapsed = time.monotonic() - t0
         # Two log lines: the historical timing line, then an explicit-count
         # line worded for grep ("transcribed N segments"). The count line
@@ -262,8 +275,16 @@ class Orchestrator:
         i0 = max(0, int(start * sr))
         i1 = min(len(audio), int(end * sr))
         slice_ = audio[i0:i1]
-        annotation = diarize.diarize_waveform(slice_, sr)
-        genders = gender.detect_genders(slice_, sr, annotation)
+        _diarize_fn = (
+            self._diarizer.diarize_waveform if self._diarizer is not None
+            else diarize.diarize_waveform
+        )
+        _gender_fn = (
+            self._gender_detector.detect_genders if self._gender_detector is not None
+            else gender.detect_genders
+        )
+        annotation = _diarize_fn(slice_, sr)
+        genders = _gender_fn(slice_, sr, annotation)
         return annotation, genders
 
     async def _translate_chunk(
@@ -404,8 +425,13 @@ class Orchestrator:
                     i0 = max(0, int(chunk.start * sr))
                     i1 = min(len(waveform), int(chunk.end * sr))
                     slice_ = waveform[i0:i1]
+                    _gender_fn = (
+                        self._gender_detector.detect_genders
+                        if self._gender_detector is not None
+                        else gender.detect_genders
+                    )
                     genders = await self._concurrency.run_in_thread(
-                        gender.detect_genders, slice_, sr, annotation,
+                        _gender_fn, slice_, sr, annotation,
                     )
                     log.info(
                         "chunk %d/%d alt-pass gender only (%d speakers; "
@@ -423,9 +449,13 @@ class Orchestrator:
                 annotations_used.append(annotation)
                 # Build chunk-local assignment + groups.
                 assigned: list[tuple[Segment, str | None]] = []
+                _assign_fn = (
+                    self._diarizer.assign_speaker if self._diarizer is not None
+                    else diarize.assign_speaker
+                )
                 for seg in chunk.segments:
                     local = Segment(seg.start - chunk.start, seg.end - chunk.start, seg.text)
-                    assigned.append((seg, diarize.assign_speaker(local, annotation)))
+                    assigned.append((seg, _assign_fn(local, annotation)))
                 groups = self._group_consecutive(assigned)
                 tasks.append(asyncio.create_task(
                     self._translate_chunk(

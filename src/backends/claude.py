@@ -40,7 +40,7 @@ class ClaudeBackend(TranslationBackend):
     async def translate_batch_async(
         self, texts: list[str], gender: str | None, target: str, **kwargs: Any
     ) -> list[str]:
-        from pipeline.translate import translate_batch_async
+        from pipeline.translate.claude import translate_batch_async
         return await translate_batch_async(
             texts, gender, target, self._get_client(), **kwargs
         )

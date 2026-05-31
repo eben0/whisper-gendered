@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from src.backends.factory import TranslationBackend, LOCAL
+
+if TYPE_CHECKING:
+    from pipeline.translate.local import LocalTranslator
 
 log = logging.getLogger("backends.local")
 
@@ -15,15 +19,16 @@ class LocalBackend(TranslationBackend):
 
     _backend_type = LOCAL
 
+    def __init__(self, translator: "LocalTranslator") -> None:
+        self._translator = translator
+
     async def translate_batch_async(
         self, texts: list[str], gender: str | None, target: str, **kwargs: Any
     ) -> list[str]:
-        from pipeline.translate_local import translate_batch_async
-        return await translate_batch_async(texts, gender, target, None, **kwargs)
+        return await self._translator.translate_batch_async(texts, gender, target, None, **kwargs)
 
     async def warmup(self) -> None:
-        from pipeline import translate_local
-        translate_local.warmup()
+        await asyncio.to_thread(self._translator.warmup)
 
     def model_name(self) -> str:
         from src.config import settings
