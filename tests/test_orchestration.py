@@ -82,7 +82,8 @@ def _make_orc(monkeypatch, segments, gender_aware, fake_audio=None, fake_backend
     monkeypatch.setattr(server.settings, "CHUNK_DURATION_SEC", 5)
     monkeypatch.setattr(server.settings, "TRANSLATE_CONCURRENCY", 2)
 
-    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc = Orchestrator(server.settings)
+    orc._concurrency = _FakeConcurrencyMgr()
     orc._transcriber = _FakeTranscriber(segments)
     if fake_audio is not None:
         orc._audio = fake_audio
@@ -146,7 +147,8 @@ async def test_plain_translate_no_diarization(monkeypatch, two_chunk_segments):
         raise AssertionError("_load_wav_mono called in plain path")
     fake_audio = _FakeAudio(raise_on_load)
 
-    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc = Orchestrator(server.settings)
+    orc._concurrency = _FakeConcurrencyMgr()
     orc._transcriber = _FakeTranscriber(two_chunk_segments)
     orc._audio = fake_audio
     orc._backend = fake_backend
@@ -163,7 +165,8 @@ async def test_plain_translate_no_diarization(monkeypatch, two_chunk_segments):
 async def test_transcription_only_when_target_none(monkeypatch, two_chunk_segments):
     monkeypatch.setattr(server.settings, "TARGET_LANGUAGE", "none")
 
-    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc = Orchestrator(server.settings)
+    orc._concurrency = _FakeConcurrencyMgr()
     orc._transcriber = _FakeTranscriber(two_chunk_segments)
     orc._audio = _FakeAudio()
     orc._backend = _FakeBackend()
@@ -196,7 +199,8 @@ async def test_chunk_local_offset_maps_speakers(monkeypatch, two_chunk_segments)
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc = Orchestrator(server.settings)
+    orc._concurrency = _FakeConcurrencyMgr()
     orc._transcriber = _FakeTranscriber(two_chunk_segments)
     orc._audio = fake_audio
     orc._backend = fake_backend
@@ -240,7 +244,8 @@ async def test_addressee_rotates_within_chunk(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc = Orchestrator(server.settings)
+    orc._concurrency = _FakeConcurrencyMgr()
     orc._transcriber = _FakeTranscriber(segs)
     orc._audio = fake_audio
     orc._backend = fake_backend
@@ -293,7 +298,8 @@ async def test_addressee_carries_across_chunks(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc = Orchestrator(server.settings)
+    orc._concurrency = _FakeConcurrencyMgr()
     orc._transcriber = _FakeTranscriber(segs)
     orc._audio = fake_audio
     orc._backend = fake_backend
@@ -350,7 +356,8 @@ async def test_addressee_does_not_carry_across_chunks(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc = Orchestrator(server.settings)
+    orc._concurrency = _FakeConcurrencyMgr()
     orc._transcriber = _FakeTranscriber(segs)
     orc._audio = fake_audio
     orc._backend = fake_backend
@@ -396,7 +403,8 @@ async def test_addressee_hint_disabled_by_flag(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc = Orchestrator(server.settings)
+    orc._concurrency = _FakeConcurrencyMgr()
     orc._transcriber = _FakeTranscriber(segs)
     orc._audio = fake_audio
     orc._backend = fake_backend
@@ -433,7 +441,8 @@ async def test_source_language_from_request_reaches_translator(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc = Orchestrator(server.settings)
+    orc._concurrency = _FakeConcurrencyMgr()
     orc._transcriber = _FakeTranscriber(segs)
     orc._audio = fake_audio
     orc._backend = fake_backend
@@ -472,7 +481,8 @@ async def test_pipeline_preserves_source_alongside_translation(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc = Orchestrator(server.settings)
+    orc._concurrency = _FakeConcurrencyMgr()
     orc._transcriber = _FakeTranscriber(segs)
     orc._audio = fake_audio
     orc._backend = fake_backend
@@ -515,18 +525,18 @@ def test_asr_response_is_source_side_file_is_target(monkeypatch):
                 raw_segments=list(source_segs), annotations=[],
             ))
         return source_segs, target_segs
-    monkeypatch.setattr(server._orchestrator, "run_pipeline", fake_pipeline)
+    monkeypatch.setattr(server._handler._orchestrator, "run_pipeline", fake_pipeline)
 
     # Stub the audio prep so the upload doesn't hit ffmpeg.
-    monkeypatch.setattr(server._audio, "encode_to_wav", lambda src, dst: None)
-    monkeypatch.setattr(server._audio, "prepare_unencoded", lambda src, dst: None)
+    monkeypatch.setattr(server._handler._audio, "encode_to_wav", lambda src, dst: None)
+    monkeypatch.setattr(server._handler._audio, "prepare_unencoded", lambda src, dst: None)
 
     captured: dict[str, object] = {}
     def fake_save(body, summary, video_file_url, suffix=None):
         captured["body"] = body
         captured["summary"] = summary
         captured["video_file_url"] = video_file_url
-    monkeypatch.setattr(server._side_file, "try_save", fake_save)
+    monkeypatch.setattr(server._handler._side_file, "try_save", fake_save)
 
     client = TestClient(server.app)
     response = client.post(
@@ -585,7 +595,8 @@ async def test_orchestrator_logs_segment_counts(monkeypatch, caplog):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc = Orchestrator(server.settings)
+    orc._concurrency = _FakeConcurrencyMgr()
     orc._transcriber = _FakeTranscriber(segs)
     orc._audio = fake_audio
     orc._backend = fake_backend
@@ -648,7 +659,8 @@ async def test_orchestrator_logs_error_on_segment_count_mismatch(monkeypatch, ca
         load_fn=lambda path: (np.zeros(16000 * 4, dtype=np.float32), 16000)
     )
 
-    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc = Orchestrator(server.settings)
+    orc._concurrency = _FakeConcurrencyMgr()
     orc._transcriber = _FakeTranscriber(segs)
     orc._audio = fake_audio
     orc._backend = _FakeBackend()
@@ -675,14 +687,14 @@ def test_asr_skips_side_file_when_target_is_none(monkeypatch):
         # ``target_segments=None`` → no A/B alt-pass invoked, so artifact
         # capture is irrelevant; just match the signature.
         return source_segs, None
-    monkeypatch.setattr(server._orchestrator, "run_pipeline", fake_pipeline)
-    monkeypatch.setattr(server._audio, "encode_to_wav", lambda src, dst: None)
-    monkeypatch.setattr(server._audio, "prepare_unencoded", lambda src, dst: None)
+    monkeypatch.setattr(server._handler._orchestrator, "run_pipeline", fake_pipeline)
+    monkeypatch.setattr(server._handler._audio, "encode_to_wav", lambda src, dst: None)
+    monkeypatch.setattr(server._handler._audio, "prepare_unencoded", lambda src, dst: None)
 
     save_called = {"hit": False}
     def fake_save(body, summary, video_file_url, suffix=None):
         save_called["hit"] = True
-    monkeypatch.setattr(server._side_file, "try_save", fake_save)
+    monkeypatch.setattr(server._handler._side_file, "try_save", fake_save)
 
     client = TestClient(server.app)
     response = client.post(
@@ -738,7 +750,8 @@ async def test_translate_context_window_is_passed_to_each_batch(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc = Orchestrator(server.settings)
+    orc._concurrency = _FakeConcurrencyMgr()
     orc._transcriber = _FakeTranscriber(segs)
     orc._audio = fake_audio
     orc._backend = fake_backend
@@ -792,7 +805,8 @@ async def test_translate_context_disabled_when_setting_zero(monkeypatch):
     )
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc = Orchestrator(server.settings)
+    orc._concurrency = _FakeConcurrencyMgr()
     orc._transcriber = _FakeTranscriber(segs)
     orc._audio = fake_audio
     orc._backend = fake_backend
@@ -830,7 +844,8 @@ async def test_translate_context_window_threads_through_plain_translate(monkeypa
 
     fake_backend = _FakeBackend(fake_translate)
 
-    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc = Orchestrator(server.settings)
+    orc._concurrency = _FakeConcurrencyMgr()
     orc._transcriber = _FakeTranscriber(segs)
     orc._audio = _FakeAudio()
     orc._backend = fake_backend
@@ -865,22 +880,22 @@ def test_asr_emits_alt_classifier_srt_when_ab_output_enabled(monkeypatch):
                 raw_segments=list(source_segs), annotations=[],
             ))
         return source_segs, target_segs
-    monkeypatch.setattr(server._orchestrator, "run_pipeline", fake_pipeline)
+    monkeypatch.setattr(server._handler._orchestrator, "run_pipeline", fake_pipeline)
 
     async def fake_alt(audio_path, language, artifacts):
         # New signature post-OOM fix: artifacts param replaces the
         # redundant re-transcribe / re-diarize. The fake doesn't need to
         # use them but must accept the kwarg so /asr's call compiles.
         return source_segs, alt_target
-    monkeypatch.setattr(server._orchestrator, "run_pipeline_alt_classifier", fake_alt)
+    monkeypatch.setattr(server._handler._orchestrator, "run_pipeline_alt_classifier", fake_alt)
 
-    monkeypatch.setattr(server._audio, "encode_to_wav", lambda src, dst: None)
-    monkeypatch.setattr(server._audio, "prepare_unencoded", lambda src, dst: None)
+    monkeypatch.setattr(server._handler._audio, "encode_to_wav", lambda src, dst: None)
+    monkeypatch.setattr(server._handler._audio, "prepare_unencoded", lambda src, dst: None)
 
     saved: list[tuple[str, str]] = []  # (suffix, body)
     def fake_save(body, summary, video_file_url, suffix=None):
         saved.append((suffix or ".he.srt", body))
-    monkeypatch.setattr(server._side_file, "try_save", fake_save)
+    monkeypatch.setattr(server._handler._side_file, "try_save", fake_save)
 
     client = TestClient(server.app)
     response = client.post(
@@ -955,7 +970,8 @@ async def test_alt_classifier_reuses_artifacts_without_retranscribe(monkeypatch)
         annotations=[sentinel_ann_chunk0],
     )
 
-    orc = Orchestrator(server.settings, _FakeConcurrencyMgr())
+    orc = Orchestrator(server.settings)
+    orc._concurrency = _FakeConcurrencyMgr()
     orc._transcriber = _CountingTranscriber()
     monkeypatch.setattr(orc._diarizer, "diarize_waveform",
                         lambda *a, **k: diarize_calls.append(a) or None)

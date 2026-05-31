@@ -19,7 +19,6 @@ from pipeline.lang import language_name
 from pipeline.segment import Segment
 
 if TYPE_CHECKING:
-    from src.core.concurrency import ConcurrencyManager
     from src.audio import Audio
     from src.backends.factory import TranslationBackend
     from pipeline.transcribe import Transcriber
@@ -40,8 +39,8 @@ class Orchestrator:
     def __init__(
         self,
         settings_: "Any",
-        concurrency: "ConcurrencyManager",
     ) -> None:
+        from src.core.concurrency import ConcurrencyManager
         from pipeline.transcribe import Transcriber
         from pipeline.diarize import Diarizer
         from pipeline.gender.ml import GenderMLClassifier
@@ -50,7 +49,7 @@ class Orchestrator:
         from src.backends.factory import create_backend
 
         self._settings = settings_
-        self._concurrency = concurrency
+        self._concurrency = ConcurrencyManager(settings_.CONCURRENT_JOBS)
         self._transcriber: Transcriber = Transcriber(settings_)
         self._diarizer: Diarizer = Diarizer(settings_)
         self._gender_ml: GenderMLClassifier = GenderMLClassifier(settings_)

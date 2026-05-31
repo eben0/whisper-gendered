@@ -22,11 +22,6 @@ VERSION = "1.0.0"
 
 _handler = AsrHandler(settings)
 
-# Expose internal objects at module level so tests can monkeypatch them.
-_orchestrator = _handler._orchestrator
-_audio = _handler._audio
-_side_file = _handler._side_file
-
 app = FastAPI(title="Gender-Aware Hebrew Subtitle Server", version=VERSION)
 
 

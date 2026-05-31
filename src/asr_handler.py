@@ -50,7 +50,7 @@ class AsrHandler:
         self._concurrency = ConcurrencyManager(settings.CONCURRENT_JOBS)
         self._audio = Audio()
         self._side_file = SideFile(settings)
-        self._orchestrator = Orchestrator(settings, self._concurrency)
+        self._orchestrator = Orchestrator(settings)
 
     def job_depth(self) -> int:
         return self._concurrency.job_depth()
