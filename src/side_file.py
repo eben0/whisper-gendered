@@ -159,3 +159,45 @@ class SideFile:
         m = int((t % 3600) // 60)
         s = int(t % 60)
         return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+# ---------------------------------------------------------------------------
+# Module-level backward-compat shims (used by tests and legacy callers).
+# These mirror the old core/side_file.py standalone-function API so tests
+# can import directly from src.side_file without instantiating SideFile.
+# ---------------------------------------------------------------------------
+
+def _compute_side_file_path(
+    video_file_url: str,
+    src_prefix: str,
+    dst_prefix: str,
+    suffix: str,
+) -> "Path | None":
+    """Standalone path-translation helper (compat shim for tests).
+
+    Equivalent to ``SideFile._settings``-driven ``compute_path`` but accepts
+    ``src_prefix``/``dst_prefix`` as explicit arguments so callers that
+    construct ad-hoc prefix pairs (e.g. unit tests) don't need a Settings
+    instance.
+    """
+    if not src_prefix or not dst_prefix or not video_file_url:
+        return None
+    decoded = urllib.parse.unquote(video_file_url)
+    if not decoded.startswith(src_prefix):
+        return None
+    rel = decoded[len(src_prefix):].replace("/", "\\")
+    local = Path(dst_prefix + rel)
+    stem = local.with_suffix("")
+    return stem.with_name(stem.name + suffix)
+
+
+def _compute_summary_path(srt_path: "Path") -> "Path":
+    """Standalone summary-path helper (compat shim for tests).
+
+    Equivalent to ``SideFile.compute_summary_path`` but usable without an
+    instance.
+    """
+    name = srt_path.name
+    if name.lower().endswith(".srt"):
+        return srt_path.with_name(name[: -len(".srt")] + SUMMARY_SUFFIX)
+    return srt_path.with_name(name + SUMMARY_SUFFIX)

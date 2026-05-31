@@ -351,38 +351,37 @@ async def test_smoke_opus_mt_en_he_produces_hebrew(monkeypatch):
 # ---------------------------------------------------------------------------- #
 
 def test_default_backend_resolves_to_claude_module(monkeypatch):
-    # When TRANSLATION_BACKEND=claude, importing core.backends should expose
-    # ``backends.backend`` as an instance of ClaudeBackend. This guards against
-    # a future refactor accidentally flipping the resolution. We force the env
-    # var to "claude" rather than unsetting it, because load_dotenv() in
-    # config.py would otherwise repopulate the dev's local .env override
-    # (e.g. TRANSLATION_BACKEND=local).
+    # When TRANSLATION_BACKEND=claude, create_backend should return a
+    # ClaudeBackend instance. This guards against a future refactor
+    # accidentally flipping the resolution. We force the env var to "claude"
+    # rather than unsetting it, because load_dotenv() in config.py would
+    # otherwise repopulate the dev's local .env override (e.g.
+    # TRANSLATION_BACKEND=local).
     import importlib
-    import core.backends as backends_module
-    import core.backend_factory as factory_module
-    import core.backend_claude as claude_module
+    import src.config as config_module
+    import src.backends.claude as claude_module
+    import src.backends.factory as factory_module
     monkeypatch.setenv("TRANSLATION_BACKEND", "claude")
-    import config
-    importlib.reload(config)
-    assert config.settings.TRANSLATION_BACKEND == "claude"
+    importlib.reload(config_module)
+    assert config_module.settings.TRANSLATION_BACKEND == "claude"
     importlib.reload(claude_module)
     importlib.reload(factory_module)
-    importlib.reload(backends_module)
-    from core.backend_claude import ClaudeBackend
-    assert isinstance(backends_module.backend, ClaudeBackend), (
+    from src.backends.claude import ClaudeBackend
+    backend_instance = factory_module.create_backend(config_module.settings)
+    assert isinstance(backend_instance, ClaudeBackend), (
         f"Claude backend should be a ClaudeBackend instance; got "
-        f"{type(backends_module.backend)!r}."
+        f"{type(backend_instance)!r}."
     )
 
 
 def test_config_default_translation_backend_is_claude():
     # Independent of the dev's local .env: the *source-level* default in
-    # config.py must be "claude". Parse the file rather than relying on the
-    # runtime settings (which load_dotenv would override).
+    # src/config.py must be "claude". Parse the file rather than relying on
+    # the runtime settings (which load_dotenv would override).
     from pathlib import Path
-    src = Path(__file__).resolve().parents[1] / "config.py"
+    src = Path(__file__).resolve().parents[1] / "src" / "config.py"
     text = src.read_text(encoding="utf-8")
     assert 'os.getenv("TRANSLATION_BACKEND", "claude")' in text, (
-        "config.py TRANSLATION_BACKEND default must be 'claude' so existing "
+        "src/config.py TRANSLATION_BACKEND default must be 'claude' so existing "
         "deployments keep using the Claude API path without an env change."
     )
