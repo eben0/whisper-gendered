@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from pipeline import translate
+import src.backends.claude as translate
 
 
 class _FakeBlock:
@@ -15,6 +15,7 @@ class _FakeBlock:
 class _FakeResponse:
     def __init__(self, text):
         self.content = [_FakeBlock(text)]
+        self.usage = None
 
 
 class _FakeMessages:
@@ -33,17 +34,34 @@ class _FakeAsyncClient:
         self.messages = _FakeMessages(payloads)
 
 
+class _FakeSettings:
+    CLAUDE_MODEL = "claude-test"
+    CLAUDE_MAX_RETRIES = 0
+
+    def require_anthropic_key(self):
+        return "fake-key"
+
+
+def _make_backend(client):
+    """Create a ClaudeBackend whose _get_client() returns the given fake client."""
+    backend = translate.ClaudeBackend(_FakeSettings())
+    backend._client = client  # bypass lazy init
+    return backend
+
+
 @pytest.mark.asyncio
 async def test_translate_batch_async_returns_translations():
     client = _FakeAsyncClient([json.dumps({"translations": ["a-he", "b-he"]})])
-    out = await translate.translate_batch_async(["a", "b"], "male", "Hebrew", client)
+    backend = _make_backend(client)
+    out = await backend.translate_batch_async(["a", "b"], "male", "Hebrew")
     assert out == ["a-he", "b-he"]
 
 
 @pytest.mark.asyncio
 async def test_translate_batch_async_pads_on_count_mismatch():
     client = _FakeAsyncClient([json.dumps({"translations": ["only-one"]})])
-    out = await translate.translate_batch_async(["a", "b"], None, "Hebrew", client)
+    backend = _make_backend(client)
+    out = await backend.translate_batch_async(["a", "b"], None, "Hebrew")
     assert len(out) == 2
     assert out[0] == "only-one"
     assert out[1] == "b"  # padded from source text
@@ -52,14 +70,16 @@ async def test_translate_batch_async_pads_on_count_mismatch():
 @pytest.mark.asyncio
 async def test_translate_batch_async_empty_input():
     client = _FakeAsyncClient([])
-    out = await translate.translate_batch_async([], "female", "Hebrew", client)
+    backend = _make_backend(client)
+    out = await backend.translate_batch_async([], "female", "Hebrew")
     assert out == []
 
 
 @pytest.mark.asyncio
 async def test_translate_batch_async_returns_source_on_unparseable_response():
     client = _FakeAsyncClient(["this is not json at all"])
-    out = await translate.translate_batch_async(["a", "b"], "male", "Hebrew", client)
+    backend = _make_backend(client)
+    out = await backend.translate_batch_async(["a", "b"], "male", "Hebrew")
     assert out == ["a", "b"]  # JSON parse fails -> falls back to source text
 
 
@@ -129,8 +149,9 @@ class _RecordingAsyncClient:
 @pytest.mark.asyncio
 async def test_translate_batch_async_forwards_addressee_into_prompt():
     client = _RecordingAsyncClient([json.dumps({"translations": ["a-he"]})])
-    await translate.translate_batch_async(
-        ["hello"], "female", "Hebrew", client, addressee_gender="male",
+    backend = _make_backend(client)
+    await backend.translate_batch_async(
+        ["hello"], "female", "Hebrew", addressee_gender="male",
     )
     assert "male" in client.messages.systems[0]
     assert "addressee" in client.messages.systems[0].lower()
@@ -139,7 +160,8 @@ async def test_translate_batch_async_forwards_addressee_into_prompt():
 @pytest.mark.asyncio
 async def test_translate_batch_async_no_addressee_when_unset():
     client = _RecordingAsyncClient([json.dumps({"translations": ["a-he"]})])
-    await translate.translate_batch_async(["hello"], "female", "Hebrew", client)
+    backend = _make_backend(client)
+    await backend.translate_batch_async(["hello"], "female", "Hebrew")
     # Generic "matching the addressee" guidance is always-on when gender is set,
     # but the specific "most likely addressee" hint must be absent.
     assert "most likely addressee" not in client.messages.systems[0].lower()
@@ -149,13 +171,15 @@ async def test_translate_batch_async_no_addressee_when_unset():
 async def test_translate_batch_async_source_language_reaches_prompt():
     # Default: prompt says "from English".
     client = _RecordingAsyncClient([json.dumps({"translations": ["a-he"]})])
-    await translate.translate_batch_async(["hello"], None, "Hebrew", client)
+    backend = _make_backend(client)
+    await backend.translate_batch_async(["hello"], None, "Hebrew")
     assert "from English into Hebrew" in client.messages.systems[0]
 
     # Overridden: prompt reflects the caller's source_language.
     client = _RecordingAsyncClient([json.dumps({"translations": ["a-he"]})])
-    await translate.translate_batch_async(
-        ["hello"], None, "Hebrew", client, source_language="French",
+    backend = _make_backend(client)
+    await backend.translate_batch_async(
+        ["hello"], None, "Hebrew", source_language="French",
     )
     assert "from French into Hebrew" in client.messages.systems[0]
     assert "from English into Hebrew" not in client.messages.systems[0]
@@ -276,8 +300,9 @@ async def test_previous_context_appears_in_user_message():
     the speaker's gender label so Claude can reconstruct turn-taking.
     """
     client = _RecordingAsyncClient([json.dumps({"translations": ["a-he"]})])
-    await translate.translate_batch_async(
-        ["new line"], None, "Hebrew", client,
+    backend = _make_backend(client)
+    await backend.translate_batch_async(
+        ["new line"], None, "Hebrew",
         previous_context=[
             ("male", "הוא הגיע בצהריים."),
             ("female", "היא כבר הייתה שם."),
@@ -299,8 +324,9 @@ async def test_previous_context_renders_without_prefix_when_gender_unknown():
     lie about information it doesn't have.
     """
     client = _RecordingAsyncClient([json.dumps({"translations": ["a-ja"]})])
-    await translate.translate_batch_async(
-        ["next line"], None, "Japanese", client,
+    backend = _make_backend(client)
+    await backend.translate_batch_async(
+        ["next line"], None, "Japanese",
         previous_context=[(None, "earlier-line-1"), (None, "earlier-line-2")],
     )
     user_msg = client.messages.payloads[0]["messages"][0]["content"]
@@ -317,8 +343,9 @@ async def test_previous_context_absent_when_window_is_empty():
     message looks identical to the pre-feature output.
     """
     client = _RecordingAsyncClient([json.dumps({"translations": ["a-he"]})])
-    await translate.translate_batch_async(
-        ["only line"], None, "Hebrew", client,
+    backend = _make_backend(client)
+    await backend.translate_batch_async(
+        ["only line"], None, "Hebrew",
     )
     user_msg = client.messages.payloads[0]["messages"][0]["content"]
     assert "Earlier in this scene" not in user_msg

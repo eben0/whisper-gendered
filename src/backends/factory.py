@@ -11,7 +11,6 @@ from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.config import Settings
-    from pipeline.translate.local import LocalTranslator
 
 # Named constants — replace all inline "local"/"claude" string literals.
 LOCAL = "local"
@@ -40,10 +39,7 @@ class TranslationBackend(ABC):
     def model_name(self) -> str: ...
 
 
-def create_backend(
-    settings: "Settings",
-    local_translator: "LocalTranslator | None" = None,
-) -> TranslationBackend:
+def create_backend(settings: "Settings") -> TranslationBackend:
     """Instantiate the backend named by ``settings.TRANSLATION_BACKEND``.
 
     No module-level singleton — caller creates and holds the instance.
@@ -56,9 +52,7 @@ def create_backend(
         case "claude":
             return ClaudeBackend(settings)
         case "local":
-            from pipeline.translate.local import LocalTranslator
-            translator = local_translator or LocalTranslator(settings)
-            return LocalBackend(translator)
+            return LocalBackend(settings)
         case other:
             raise ValueError(
                 f"Unknown TRANSLATION_BACKEND {other!r}. Valid: 'claude', 'local'."

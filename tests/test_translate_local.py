@@ -6,8 +6,7 @@ Three layers, matching the style of ``tests/test_translate_async.py``:
 2. Smoke — real ``Helsinki-NLP/opus-mt-en-he`` download + translate; auto-
    skipped if torch.cuda is unavailable or transformers can't reach the hub.
 3. Regression — confirm that with TRANSLATION_BACKEND=claude (default),
-   ``server.translate`` resolves to ``pipeline.translate.claude`` and not to
-   ``pipeline.translate.local``.
+   ``create_backend`` returns a ClaudeBackend and not a LocalBackend.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ import re
 
 import pytest
 
-from pipeline.translate.local import LocalTranslator, _is_nllb_tokenizer
+from src.backends.local import LocalBackend, _is_nllb_tokenizer
 from src.config import settings as _settings
 
 
@@ -79,7 +78,7 @@ class _FakeModel:
 
 @pytest.mark.asyncio
 async def test_translate_batch_async_preserves_count_and_returns_strings(monkeypatch):
-    translator = LocalTranslator(_settings)
+    backend = LocalBackend(_settings)
     fake_tok = _FakeTokenizer()
     fake_model = _FakeModel()
 
@@ -91,12 +90,12 @@ async def test_translate_batch_async_preserves_count_and_returns_strings(monkeyp
     fake_model.generate = fake_generate
 
     monkeypatch.setattr(
-        translator, "get_model_and_tokenizer",
+        backend, "get_model_and_tokenizer",
         lambda: (fake_model, fake_tok),
     )
 
-    out = await translator.translate_batch_async(
-        ["a", "b", "c"], gender="male", target_language="Hebrew",
+    out = await backend.translate_batch_async(
+        ["a", "b", "c"], gender="male", target="Hebrew",
     )
     assert len(out) == 3
     assert all(isinstance(s, str) and s for s in out)
@@ -106,10 +105,10 @@ async def test_translate_batch_async_preserves_count_and_returns_strings(monkeyp
 
 @pytest.mark.asyncio
 async def test_translate_batch_async_empty_input():
-    translator = LocalTranslator(_settings)
+    backend = LocalBackend(_settings)
     # Empty input must short-circuit before any model load.
-    out = await translator.translate_batch_async(
-        [], gender="female", target_language="Hebrew",
+    out = await backend.translate_batch_async(
+        [], gender="female", target="Hebrew",
     )
     assert out == []
 
@@ -193,16 +192,16 @@ async def test_translate_batch_async_serialises_concurrent_calls(monkeypatch):
     fake_model = _FakeModel()
     fake_model.generate = lambda **kw: [None]
 
-    translator = LocalTranslator(_settings)
+    backend = LocalBackend(_settings)
     monkeypatch.setattr(
-        translator, "get_model_and_tokenizer",
+        backend, "get_model_and_tokenizer",
         lambda: (fake_model, fake_tok),
     )
 
     results = await asyncio.gather(
-        translator.translate_batch_async(["a"], None, "Hebrew"),
-        translator.translate_batch_async(["b"], None, "Hebrew"),
-        translator.translate_batch_async(["c"], None, "Hebrew"),
+        backend.translate_batch_async(["a"], None, "Hebrew"),
+        backend.translate_batch_async(["b"], None, "Hebrew"),
+        backend.translate_batch_async(["c"], None, "Hebrew"),
     )
     assert all(r == ["HE:0"] for r in results)
     assert max_concurrent == 1, (
@@ -214,21 +213,20 @@ async def test_translate_batch_async_serialises_concurrent_calls(monkeypatch):
 @pytest.mark.asyncio
 async def test_translate_batch_async_accepts_and_ignores_client_and_addressee(monkeypatch):
     # Signature parity with the Claude backend: extra kwargs are accepted.
-    translator = LocalTranslator(_settings)
+    backend = LocalBackend(_settings)
     fake_tok = _FakeTokenizer()
     fake_model = _FakeModel()
     fake_model.generate = lambda **kw: [None]
 
     monkeypatch.setattr(
-        translator, "get_model_and_tokenizer",
+        backend, "get_model_and_tokenizer",
         lambda: (fake_model, fake_tok),
     )
 
-    out = await translator.translate_batch_async(
+    out = await backend.translate_batch_async(
         ["x"],
         gender="male",
-        target_language="Hebrew",
-        client=object(),         # ignored
+        target="Hebrew",
         addressee_gender="female",  # ignored
     )
     assert out == ["HE:0"]
@@ -241,15 +239,15 @@ async def test_translate_batch_async_accepts_previous_context_kwarg(monkeypatch)
     # orchestrator can pass it uniformly regardless of TRANSLATION_BACKEND.
     captured: dict = {}
 
-    translator = LocalTranslator(_settings)
+    backend = LocalBackend(_settings)
 
     def fake_sync(texts, gender, tgt, src):
         captured["args"] = (texts, gender, tgt, src)
         return ["X" for _ in texts]
 
-    monkeypatch.setattr(translator, "_translate_sync", fake_sync)
+    monkeypatch.setattr(backend, "_translate_sync", fake_sync)
 
-    out = await translator.translate_batch_async(
+    out = await backend.translate_batch_async(
         ["hello"], None, "Hebrew",
         previous_context=["earlier line 1", "earlier line 2"],
     )
@@ -315,19 +313,19 @@ async def test_smoke_opus_mt_en_he_produces_hebrew(monkeypatch):
     # Override the configured model to the lightweight fallback so the test
     # runs in <1 minute on first invocation. Subsequent runs are seconds
     # (HF cache hit).
-    translator = LocalTranslator(_settings)
-    monkeypatch.setattr(translator._settings, "LOCAL_TRANSLATION_MODEL",
+    backend = LocalBackend(_settings)
+    monkeypatch.setattr(backend._settings, "LOCAL_TRANSLATION_MODEL",
                         "Helsinki-NLP/opus-mt-en-he")
-    monkeypatch.setattr(translator._settings, "LOCAL_BATCH_SIZE", 2)
+    monkeypatch.setattr(backend._settings, "LOCAL_BATCH_SIZE", 2)
     try:
-        out = await translator.translate_batch_async(
+        out = await backend.translate_batch_async(
             ["Hello, how are you?", "I am going to the market this afternoon."],
             gender=None,
-            target_language="Hebrew",
+            target="Hebrew",
         )
     finally:
-        translator._model = None
-        translator._tokenizer = None
+        backend._model = None
+        backend._tokenizer = None
 
     assert len(out) == 2
     for line in out:
