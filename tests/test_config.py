@@ -1,6 +1,6 @@
 import importlib
 
-import config as config_module
+import src.config as config_module
 
 
 def test_new_settings_have_defaults():

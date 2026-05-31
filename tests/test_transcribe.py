@@ -8,7 +8,7 @@ segment-level timestamps drift over long audio (~4s after 4 min,
 observed in S04E05).
 """
 
-from pipeline import transcribe
+from pipeline.transcribe import Transcriber
 
 
 class _Word:
@@ -33,8 +33,14 @@ class _Info:
     language_probability = 1.0
 
 
-def _patch_model(monkeypatch, raw_segs):
-    """Patch the singleton-loader to return a model that yields ``raw_segs``."""
+class _FakeSettings:
+    WHISPER_MODEL = "tiny"
+    DEVICE = "cpu"
+    COMPUTE_TYPE = "int8"
+
+
+def _make_transcriber(raw_segs):
+    """Return a Transcriber whose underlying model yields ``raw_segs``."""
 
     class _FakeModel:
         def transcribe(self, *args, **kwargs):
@@ -45,10 +51,12 @@ def _patch_model(monkeypatch, raw_segs):
             )
             return iter(raw_segs), _Info()
 
-    monkeypatch.setattr(transcribe, "get_model", lambda: _FakeModel())
+    t = Transcriber(_FakeSettings())
+    t._model = _FakeModel()  # bypass lazy loading
+    return t
 
 
-def test_transcribe_anchors_segment_start_to_first_word(monkeypatch):
+def test_transcribe_anchors_segment_start_to_first_word():
     """faster-whisper's segment.start can lag the first spoken word by
     100ms-1s; with word_timestamps enabled we override segment.start
     with the first word's start so timing drift doesn't accumulate.
@@ -57,9 +65,9 @@ def test_transcribe_anchors_segment_start_to_first_word(monkeypatch):
         start=10.5, end=14.0, text="hello world",
         words=[_Word(10.0, 10.5, "hello"), _Word(10.5, 14.0, "world")],
     )]
-    _patch_model(monkeypatch, raw)
+    t = _make_transcriber(raw)
 
-    out = transcribe.transcribe("ignored.wav", language="en")
+    out = t.transcribe("ignored.wav", language="en")
     assert len(out) == 1
     assert out[0].start == 10.0, (
         f"segment.start should be re-anchored to first word; got {out[0].start}"
@@ -68,7 +76,7 @@ def test_transcribe_anchors_segment_start_to_first_word(monkeypatch):
     assert out[0].text == "hello world"
 
 
-def test_transcribe_anchors_segment_end_to_last_word(monkeypatch):
+def test_transcribe_anchors_segment_end_to_last_word():
     """Same as start, for the end timestamp. Whisper's seg.end is often
     rounded to the next pause; word.end is tighter.
     """
@@ -80,38 +88,38 @@ def test_transcribe_anchors_segment_end_to_last_word(monkeypatch):
             _Word(12.0, 13.5, "three"),
         ],
     )]
-    _patch_model(monkeypatch, raw)
+    t = _make_transcriber(raw)
 
-    out = transcribe.transcribe("ignored.wav", language="en")
+    out = t.transcribe("ignored.wav", language="en")
     assert out[0].start == 10.0
     assert out[0].end == 13.5, (
         f"segment.end should be re-anchored to last word; got {out[0].end}"
     )
 
 
-def test_transcribe_uses_segment_times_when_words_missing(monkeypatch):
+def test_transcribe_uses_segment_times_when_words_missing():
     """If word_timestamps somehow produced no words for a segment (rare),
     fall back to the segment-level timestamps rather than crashing.
     """
     raw = [_RawSeg(start=5.0, end=6.0, text="hmm", words=None)]
-    _patch_model(monkeypatch, raw)
+    t = _make_transcriber(raw)
 
-    out = transcribe.transcribe("ignored.wav", language="en")
+    out = t.transcribe("ignored.wav", language="en")
     assert out[0].start == 5.0
     assert out[0].end == 6.0
 
 
-def test_transcribe_handles_empty_words_list(monkeypatch):
+def test_transcribe_handles_empty_words_list():
     """Same fallback applies when ``words`` is present but empty."""
     raw = [_RawSeg(start=5.0, end=6.0, text="hmm", words=[])]
-    _patch_model(monkeypatch, raw)
+    t = _make_transcriber(raw)
 
-    out = transcribe.transcribe("ignored.wav", language="en")
+    out = t.transcribe("ignored.wav", language="en")
     assert out[0].start == 5.0
     assert out[0].end == 6.0
 
 
-def test_transcribe_strips_text_whitespace(monkeypatch):
+def test_transcribe_strips_text_whitespace():
     """Pre-existing contract: leading/trailing whitespace on the raw text
     is stripped. This test pins it so the word-anchor refactor doesn't
     accidentally drop the strip().
@@ -120,7 +128,7 @@ def test_transcribe_strips_text_whitespace(monkeypatch):
         start=0.0, end=1.0, text="   hi   ",
         words=[_Word(0.0, 1.0, "hi")],
     )]
-    _patch_model(monkeypatch, raw)
+    t = _make_transcriber(raw)
 
-    out = transcribe.transcribe("ignored.wav", language="en")
+    out = t.transcribe("ignored.wav", language="en")
     assert out[0].text == "hi"

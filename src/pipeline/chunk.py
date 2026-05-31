@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pipeline.transcribe import Segment
+from pipeline.segment import Segment
 
 
 @dataclass

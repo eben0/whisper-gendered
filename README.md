@@ -261,16 +261,37 @@ In Bazarr, configure the **Whisper** provider and point its endpoint at
 ## Project layout
 
 ```
-config.py            Settings + GENDER_AWARE_LANGUAGES
-server.py            FastAPI app, /asr orchestration, warm-up, concurrency
+config.py                  Settings + GENDER_AWARE_LANGUAGES
+server.py                  Thin HTTP layer — FastAPI app + 3 routes (~185 lines)
+core/                      Web-agnostic application core (importable without FastAPI)
+  cuda.py                  CUDA/librosa bootstrap (import-ordering critical)
+  logging_config.py        Process-wide logging setup
+  concurrency.py           ConcurrencyManager — executor, semaphore, job counter
+  backends.py              Backend selection + TranslationBackend ABC
+  backend_factory.py       match-case factory; module-level backend singleton
+  backend_claude.py        ClaudeBackend — Anthropic API translation
+  backend_local.py         LocalBackend — on-device HuggingFace translation
+  backend_base.py          TranslationBackend abstract base class
+  audio.py                 Audio I/O: encode, decode, load waveform
+  side_file.py             Side-file paths, atomic writes, translation summaries
+  artifacts.py             PipelineArtifacts dataclass
+  orchestrator.py          Pipeline orchestration: transcribe → diarize ⇄ translate
+  lifecycle.py             Startup warm-up (model pre-loading)
 pipeline/
-  transcribe.py      faster-whisper wrapper (lazy singleton)
-  diarize.py         pyannote speaker diarization
-  gender.py          pitch-based gender detection
-  translate.py       batched Claude translation (structured outputs)
-  format.py          SRT/VTT/TXT/TSV/JSON renderers
-run.ps1              PowerShell launcher (prints LAN IP)
+  segment.py               Segment DTO (one class per file)
+  transcribe.py            faster-whisper wrapper (lazy singleton)
+  diarize.py               pyannote speaker diarization
+  gender.py                Pitch/ML/ensemble gender dispatcher
+  gender_ml.py             wav2vec2 gender classifier singleton
+  translate.py             Claude batched translation
+  translate_local.py       Local HuggingFace seq2seq translation
+  chunk.py                 Segment chunking with trailing-merge
+  format.py                SRT/VTT/TXT/TSV/JSON renderers
+  lang.py                  Language name helpers + script-ratio checker
+run.ps1                    PowerShell launcher (prints LAN IP)
 ```
+
+`core.orchestrator.run_pipeline_async` is importable without FastAPI — the seam for a future standalone CLI (`core.cuda.bootstrap()` then call the orchestrator directly; CLI args are out of scope).
 
 ## Claude API cost reference
 

@@ -6,8 +6,7 @@ Three layers, matching the style of ``tests/test_translate_async.py``:
 2. Smoke — real ``Helsinki-NLP/opus-mt-en-he`` download + translate; auto-
    skipped if torch.cuda is unavailable or transformers can't reach the hub.
 3. Regression — confirm that with TRANSLATION_BACKEND=claude (default),
-   ``server.translate`` resolves to ``pipeline.translate`` and not to
-   ``pipeline.translate_local``.
+   ``create_backend`` returns a ClaudeBackend and not a LocalBackend.
 """
 
 from __future__ import annotations
@@ -17,7 +16,8 @@ import re
 
 import pytest
 
-from pipeline import translate_local
+from src.backends.local import LocalBackend, _is_nllb_tokenizer
+from src.config import settings as _settings
 
 
 # ---------------------------------------------------------------------------- #
@@ -78,6 +78,7 @@ class _FakeModel:
 
 @pytest.mark.asyncio
 async def test_translate_batch_async_preserves_count_and_returns_strings(monkeypatch):
+    backend = LocalBackend(_settings)
     fake_tok = _FakeTokenizer()
     fake_model = _FakeModel()
 
@@ -89,12 +90,12 @@ async def test_translate_batch_async_preserves_count_and_returns_strings(monkeyp
     fake_model.generate = fake_generate
 
     monkeypatch.setattr(
-        translate_local, "get_model_and_tokenizer",
+        backend, "get_model_and_tokenizer",
         lambda: (fake_model, fake_tok),
     )
 
-    out = await translate_local.translate_batch_async(
-        ["a", "b", "c"], gender="male", target_language="Hebrew",
+    out = await backend.translate_batch_async(
+        ["a", "b", "c"], gender="male", target="Hebrew",
     )
     assert len(out) == 3
     assert all(isinstance(s, str) and s for s in out)
@@ -104,9 +105,10 @@ async def test_translate_batch_async_preserves_count_and_returns_strings(monkeyp
 
 @pytest.mark.asyncio
 async def test_translate_batch_async_empty_input():
+    backend = LocalBackend(_settings)
     # Empty input must short-circuit before any model load.
-    out = await translate_local.translate_batch_async(
-        [], gender="female", target_language="Hebrew",
+    out = await backend.translate_batch_async(
+        [], gender="female", target="Hebrew",
     )
     assert out == []
 
@@ -119,14 +121,6 @@ async def test_translate_batch_async_serialises_concurrent_calls(monkeypatch):
     # — we simulate the panic with a fake tokenizer that explodes when entered
     # while another thread is still inside it. With the lock in place, both
     # calls complete; without it, this test would raise.
-    #
-    # v2: the fake tokenizer ALSO has a ``src_lang`` property setter (and a
-    # ``convert_tokens_to_ids`` method) that share the same borrow state as
-    # ``__call__``. The v1 of this test only proxied ``__call__``, so the
-    # production NLLB tokenizer's ``src_lang`` mutation racing with a sibling
-    # thread's ``tokenizer(batch)`` was not exercised — exactly the bug that
-    # slipped through to production after the v1 fix. With the v2 lock that
-    # also covers src_lang/convert_tokens_to_ids, both calls complete.
     import asyncio
     import threading
 
@@ -142,8 +136,6 @@ async def test_translate_batch_async_serialises_concurrent_calls(monkeypatch):
                 entered += 1
                 max_concurrent = max(max_concurrent, entered)
                 if entered > 1:
-                    # Mimic the HF Rust panic. ``label`` makes a regression
-                    # easy to attribute (call vs src_lang vs convert).
                     raise RuntimeError(
                         f"Already borrowed (concurrent {label})"
                     )
@@ -155,15 +147,11 @@ async def test_translate_batch_async_serialises_concurrent_calls(monkeypatch):
                 entered -= 1
 
     class _RaceTokenizer:
-        # Mark as NLLB so the production code's _is_nllb_tokenizer branch
-        # fires and actually exercises src_lang + convert_tokens_to_ids.
         __name__ = "NllbTokenizer"
 
         def __init__(self):
             self._src_lang = "eng_Latn"
 
-        # Class name lookup uses ``type(tok).__name__``; override the class
-        # name so production detection treats this as NLLB.
         @property
         def src_lang(self):
             return self._src_lang
@@ -199,22 +187,21 @@ async def test_translate_batch_async_serialises_concurrent_calls(monkeypatch):
         def batch_decode(self, ids, **kwargs):
             return [f"HE:{i}" for i in range(len(ids))]
 
-    # Coerce type().__name__ to start with "Nllb" so _is_nllb_tokenizer
-    # returns True (it keys on the class name).
     _RaceTokenizer.__name__ = "NllbTokenizer"
     fake_tok = _RaceTokenizer()
     fake_model = _FakeModel()
     fake_model.generate = lambda **kw: [None]
 
+    backend = LocalBackend(_settings)
     monkeypatch.setattr(
-        translate_local, "get_model_and_tokenizer",
+        backend, "get_model_and_tokenizer",
         lambda: (fake_model, fake_tok),
     )
 
     results = await asyncio.gather(
-        translate_local.translate_batch_async(["a"], None, "Hebrew"),
-        translate_local.translate_batch_async(["b"], None, "Hebrew"),
-        translate_local.translate_batch_async(["c"], None, "Hebrew"),
+        backend.translate_batch_async(["a"], None, "Hebrew"),
+        backend.translate_batch_async(["b"], None, "Hebrew"),
+        backend.translate_batch_async(["c"], None, "Hebrew"),
     )
     assert all(r == ["HE:0"] for r in results)
     assert max_concurrent == 1, (
@@ -226,20 +213,20 @@ async def test_translate_batch_async_serialises_concurrent_calls(monkeypatch):
 @pytest.mark.asyncio
 async def test_translate_batch_async_accepts_and_ignores_client_and_addressee(monkeypatch):
     # Signature parity with the Claude backend: extra kwargs are accepted.
+    backend = LocalBackend(_settings)
     fake_tok = _FakeTokenizer()
     fake_model = _FakeModel()
     fake_model.generate = lambda **kw: [None]
 
     monkeypatch.setattr(
-        translate_local, "get_model_and_tokenizer",
+        backend, "get_model_and_tokenizer",
         lambda: (fake_model, fake_tok),
     )
 
-    out = await translate_local.translate_batch_async(
+    out = await backend.translate_batch_async(
         ["x"],
         gender="male",
-        target_language="Hebrew",
-        client=object(),         # ignored
+        target="Hebrew",
         addressee_gender="female",  # ignored
     )
     assert out == ["HE:0"]
@@ -252,13 +239,15 @@ async def test_translate_batch_async_accepts_previous_context_kwarg(monkeypatch)
     # orchestrator can pass it uniformly regardless of TRANSLATION_BACKEND.
     captured: dict = {}
 
+    backend = LocalBackend(_settings)
+
     def fake_sync(texts, gender, tgt, src):
         captured["args"] = (texts, gender, tgt, src)
         return ["X" for _ in texts]
 
-    monkeypatch.setattr(translate_local, "_translate_sync", fake_sync)
+    monkeypatch.setattr(backend, "_translate_sync", fake_sync)
 
-    out = await translate_local.translate_batch_async(
+    out = await backend.translate_batch_async(
         ["hello"], None, "Hebrew",
         previous_context=["earlier line 1", "earlier line 2"],
     )
@@ -278,22 +267,22 @@ def test_is_nllb_tokenizer_keys_on_class_name():
     class MarianTokenizer: pass
     class MarianTokenizerFast: pass
 
-    assert translate_local._is_nllb_tokenizer(NllbTokenizer()) is True
-    assert translate_local._is_nllb_tokenizer(NllbTokenizerFast()) is True
-    assert translate_local._is_nllb_tokenizer(MarianTokenizer()) is False
-    assert translate_local._is_nllb_tokenizer(MarianTokenizerFast()) is False
+    assert _is_nllb_tokenizer(NllbTokenizer()) is True
+    assert _is_nllb_tokenizer(NllbTokenizerFast()) is True
+    assert _is_nllb_tokenizer(MarianTokenizer()) is False
+    assert _is_nllb_tokenizer(MarianTokenizerFast()) is False
 
     # A historical NLLB tokenizer that still has lang_code_to_id but a
     # different (hypothetical) class name should still be detected by name.
     class NllbV2Tokenizer:
         lang_code_to_id = {"eng_Latn": 256047}
-    assert translate_local._is_nllb_tokenizer(NllbV2Tokenizer()) is True
+    assert _is_nllb_tokenizer(NllbV2Tokenizer()) is True
 
     # An unrelated tokenizer that happens to expose ``lang_code_to_id`` must
     # NOT be classified as NLLB — that was the old bug in reverse.
     class WeirdTokenizer:
         lang_code_to_id = {"foo": 1}
-    assert translate_local._is_nllb_tokenizer(WeirdTokenizer()) is False
+    assert _is_nllb_tokenizer(WeirdTokenizer()) is False
 
 
 # ---------------------------------------------------------------------------- #
@@ -324,22 +313,19 @@ async def test_smoke_opus_mt_en_he_produces_hebrew(monkeypatch):
     # Override the configured model to the lightweight fallback so the test
     # runs in <1 minute on first invocation. Subsequent runs are seconds
     # (HF cache hit).
-    monkeypatch.setattr(translate_local.settings, "LOCAL_TRANSLATION_MODEL",
+    backend = LocalBackend(_settings)
+    monkeypatch.setattr(backend._settings, "LOCAL_TRANSLATION_MODEL",
                         "Helsinki-NLP/opus-mt-en-he")
-    monkeypatch.setattr(translate_local.settings, "LOCAL_BATCH_SIZE", 2)
-    # Force a fresh load so a previously-loaded model from a different test
-    # doesn't shadow our override.
-    translate_local._model = None
-    translate_local._tokenizer = None
+    monkeypatch.setattr(backend._settings, "LOCAL_BATCH_SIZE", 2)
     try:
-        out = await translate_local.translate_batch_async(
+        out = await backend.translate_batch_async(
             ["Hello, how are you?", "I am going to the market this afternoon."],
             gender=None,
-            target_language="Hebrew",
+            target="Hebrew",
         )
     finally:
-        translate_local._model = None
-        translate_local._tokenizer = None
+        backend._model = None
+        backend._tokenizer = None
 
     assert len(out) == 2
     for line in out:
@@ -351,32 +337,33 @@ async def test_smoke_opus_mt_en_he_produces_hebrew(monkeypatch):
 # ---------------------------------------------------------------------------- #
 
 def test_default_backend_resolves_to_claude_module(monkeypatch):
-    # When TRANSLATION_BACKEND=claude, importing server binds ``server.translate``
-    # to pipeline.translate. This guards against a future refactor accidentally
-    # flipping the resolution. We force the env var to "claude" rather than
-    # unsetting it, because load_dotenv() in config.py would otherwise repopulate
-    # the dev's local .env override (e.g. TRANSLATION_BACKEND=local).
+    # When TRANSLATION_BACKEND=claude, create_backend should return a
+    # ClaudeBackend instance.
     import importlib
+    import src.config as config_module
+    import src.backends.claude as claude_module
+    import src.backends.factory as factory_module
     monkeypatch.setenv("TRANSLATION_BACKEND", "claude")
-    import config
-    importlib.reload(config)
-    assert config.settings.TRANSLATION_BACKEND == "claude"
-    import server
-    importlib.reload(server)
-    assert server.translate.__name__ == "pipeline.translate", (
-        f"Claude backend should resolve to pipeline.translate; got "
-        f"{server.translate.__name__}."
+    importlib.reload(config_module)
+    assert config_module.settings.TRANSLATION_BACKEND == "claude"
+    importlib.reload(claude_module)
+    importlib.reload(factory_module)
+    from src.backends.claude import ClaudeBackend
+    backend_instance = factory_module.create_backend(config_module.settings)
+    assert isinstance(backend_instance, ClaudeBackend), (
+        f"Claude backend should be a ClaudeBackend instance; got "
+        f"{type(backend_instance)!r}."
     )
 
 
 def test_config_default_translation_backend_is_claude():
     # Independent of the dev's local .env: the *source-level* default in
-    # config.py must be "claude". Parse the file rather than relying on the
-    # runtime settings (which load_dotenv would override).
+    # src/config.py must be "claude". Parse the file rather than relying on
+    # the runtime settings (which load_dotenv would override).
     from pathlib import Path
-    src = Path(__file__).resolve().parents[1] / "config.py"
+    src = Path(__file__).resolve().parents[1] / "src" / "config.py"
     text = src.read_text(encoding="utf-8")
     assert 'os.getenv("TRANSLATION_BACKEND", "claude")' in text, (
-        "config.py TRANSLATION_BACKEND default must be 'claude' so existing "
+        "src/config.py TRANSLATION_BACKEND default must be 'claude' so existing "
         "deployments keep using the Claude API path without an env change."
     )

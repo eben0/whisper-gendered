@@ -9,7 +9,7 @@ project; the server runs on the host that owns the share mount).
 
 from pathlib import Path
 
-from server import _compute_side_file_path, _compute_summary_path
+from src.side_file import _compute_side_file_path, _compute_summary_path
 
 
 def test_translates_linux_prefix_to_windows_prefix():

@@ -7,7 +7,7 @@ import importlib
 import dotenv
 import pytest
 
-import config
+import src.config as config
 
 
 @pytest.fixture(autouse=True)
