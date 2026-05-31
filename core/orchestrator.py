@@ -362,7 +362,7 @@ async def run_pipeline_async(
             "segment count mismatch — pipeline lost %d segments between "
             "transcribe and translate (input=%d, output=%d). Translation "
             "JSON length mismatch or chunk-boundary drop likely; check "
-            "_translate_chunk in server.py and the alignment fallback in "
+            "_translate_chunk in core/orchestrator.py and the alignment fallback in "
             "pipeline/translate.py.",
             diff, len(segments), len(target_segments),
         )

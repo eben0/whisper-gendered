@@ -385,7 +385,7 @@ def test_asr_response_is_source_side_file_is_target(monkeypatch):
     monkeypatch.setattr(server.audio, "prepare_unencoded", lambda src, dst: None)
 
     captured: dict[str, object] = {}
-    def fake_save(body, summary, video_file_url):
+    def fake_save(body, summary, video_file_url, suffix=None):
         captured["body"] = body
         captured["summary"] = summary
         captured["video_file_url"] = video_file_url
@@ -502,8 +502,7 @@ async def test_orchestrator_logs_error_on_segment_count_mismatch(monkeypatch, ca
     # surface as duplicate-text rather than a true count mismatch — but
     # we test the explicit-mismatch error path here by short-circuiting
     # the pipeline at the count level.
-    async def fake_pipeline_inner_drop(audio_path, segments, target, client,
-                                       source_language="English",
+    async def fake_pipeline_inner_drop(audio_path, segments, target, source_language="English",
                                        precomputed_annotations=None):
         # Return one fewer segment than was passed in. ``_run_gender_aware``
         # now returns ``(segments, annotations_used)``; the empty list
@@ -541,7 +540,7 @@ def test_asr_skips_side_file_when_target_is_none(monkeypatch):
     monkeypatch.setattr(server.audio, "prepare_unencoded", lambda src, dst: None)
 
     save_called = {"hit": False}
-    def fake_save(body, summary, video_file_url):
+    def fake_save(body, summary, video_file_url, suffix=None):
         save_called["hit"] = True
     monkeypatch.setattr(server.side_file, "_try_save_side_file", fake_save)
 
@@ -782,8 +781,7 @@ async def test_alt_classifier_reuses_artifacts_without_retranscribe(monkeypatch)
     # Stub _run_gender_aware to (a) capture its precomputed_annotations
     # arg and (b) return without touching real diarize.
     captured: dict = {}
-    async def fake_gender_aware(audio_path, segments, target, client,
-                                source_language="English",
+    async def fake_gender_aware(audio_path, segments, target, source_language="English",
                                 precomputed_annotations=None):
         captured["precomputed_annotations"] = precomputed_annotations
         captured["segments_texts"] = [s.text for s in segments]
